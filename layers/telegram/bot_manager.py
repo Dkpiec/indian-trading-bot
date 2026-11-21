@@ -321,6 +321,14 @@ class BotManager:
         log.info("Manual polling loop started", token_prefix=token[:10])
 
         async with httpx.AsyncClient(timeout=30.0) as client:
+            # Network diagnostic: verify api.telegram.org is reachable
+            try:
+                diag_resp = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+                print(f"NET_DIAG getMe HTTP {diag_resp.status_code} body={diag_resp.text[:200]}", flush=True)
+            except Exception as diag_err:
+                print(f"NET_DIAG FAIL: {type(diag_err).__name__}: {diag_err}", flush=True)
+                log.warning("Network diagnostic to api.telegram.org failed", error=str(diag_err))
+
             poll_count = 0
             while self._apps.get(token) is app:
                 poll_count += 1
