@@ -238,10 +238,12 @@ class BotManager:
         from layers.telegram.commands import register_handlers
         from telegram.ext import ContextTypes
 
-        bot_mgr_ref = self  # capture for closure
+        bot_mgr_ref = self # capture for closure
 
         async def _post_init(app: Application) -> None:
-            """Called by PTB after initialize(), before start(). Safe place to add handlers."""
+            """Called by PTB after initialize(), before start(). Must be async in v21.9."""
+            print(f"POST_INIT_FIRED for token {token[:10]}", flush=True)
+
             # Global error handler
             async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.error(
@@ -255,6 +257,7 @@ class BotManager:
             # Register all command handlers
             register_handlers(app, bot_mgr_ref)
             log.info("Handlers registered via post_init", token_prefix=token[:10])
+            print(f"HANDLERS_REGISTERED count={len(app.handlers)}", flush=True)
 
             # Set bot menu commands
             try:
