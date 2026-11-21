@@ -229,12 +229,19 @@ class BotManager:
     # ------------------------------------------------------------------
 
     async def _build_application(self, token: str) -> Application:
-        """Build, configure, and start a new Application for the given token."""
+        """Build, configure, and start a new Application for the given token.
+
+        PTB v21+ requires: build() → initialize() → add_handler() → start() → start_polling().
+        Handlers added before initialize() are silently ignored by the dispatcher.
+        """
         from layers.telegram.commands import register_handlers
         from telegram import Update
         from telegram.ext import ContextTypes
 
         app = ApplicationBuilder().token(token).build()
+
+        # Initialize FIRST — makes dispatcher and app.bot available
+        await app.initialize()
 
         # Global error handler — logs ANY unhandled exception during update processing
         async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -247,11 +254,9 @@ class BotManager:
 
         app.add_error_handler(_error_handler)
 
-        # Register all command handlers with user-routing wrapper
+        # Register handlers AFTER initialize (PTB v21+ requirement)
         register_handlers(app, self)
-
-        # Initialize FIRST (makes app.bot available), then set menu, then start
-        await app.initialize()
+        log.info("Handlers registered after initialize", token_prefix=token[:10])
 
         try:
             await app.bot.set_my_commands(MENU_COMMANDS)
