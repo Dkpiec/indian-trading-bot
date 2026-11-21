@@ -19,7 +19,7 @@ tenacity==9.0.0
 # Broker SDKs (pinned versions from Hermes engine wheelhouse)
 # upstox-client installed from local wheelhouse in Dockerfile
 # dhanhq via pip
-dhanhq==1.4.0
+dhanhq>=2.0.0
 
 # Testing
 pytest==8.3.4
