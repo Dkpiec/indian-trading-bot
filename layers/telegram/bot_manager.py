@@ -268,11 +268,16 @@ class BotManager:
         except Exception as e:
             log.warning("Failed to set bot commands menu", error=str(e))
 
-        # Start and poll
+        # Start app (makes bot available for API calls)
         await app.start()
-        await app.updater.start_polling(drop_pending_updates=False)
 
-        log.info("Bot polling started successfully", token_prefix=token[:10])
+        # Use manual polling loop instead of app.updater.start_polling()
+        # PTB v21.9 dispatcher silently fails to route updates in containerized uvicorn
+        self._manual_poll_task = asyncio.create_task(
+            self._manual_polling_loop(app, token)
+        )
+
+        log.info("Bot manual polling started", token_prefix=token[:10])
         return app
 
     async def _count_users_with_token(self, token: str) -> int:
@@ -302,3 +307,53 @@ class BotManager:
             # Column may not exist yet (migration not applied)
             log.warning("DB token hash count failed (column missing?)", error=str(e))
             return 0
+    async def _manual_polling_loop(self, app: Application, token: str) -> None:
+        """Fallback: manually poll getUpdates and dispatch to registered handlers.
+
+        Used when app.updater.start_polling() silently fails to dispatch
+        updates to handlers in containerized uvicorn deployments.
+        """
+        import httpx
+
+        base_url = "https://api.telegram.org"
+        offset = 0
+
+        log.info("Manual polling loop started", token_prefix=token[:10])
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while self._apps.get(token) is app:
+                try:
+                    resp = await client.get(
+                        f"{base_url}/bot{token}/getUpdates",
+                        params={"offset": offset, "timeout": 10, "long_polling": "false"},
+                    )
+                    data = resp.json()
+                    updates = data.get("result", [])
+
+                    for update in updates:
+                        update_id = update.get("update_id", 0)
+                        offset = update_id + 1
+
+                        # Build a PTB Update object manually
+                        from telegram import Update as PTBUpdate
+                        from telegram.ext import CallbackContext
+                        ptb_update = PTBUpdate.de_json(update, context=CallbackContext(app, None))
+
+                        # Find matching handler in app.handlers
+                        for handler_group in app.handlers.values():
+                            for handler in handler_group:
+                                try:
+                                    if handler.check_update(ptb_update):
+                                        context = await app.create_callback_context(ptb_update)
+                                        await handler.callback(ptb_update, context)
+                                        break
+                                except Exception as e:
+                                    log.error("Handler dispatch error", error=str(e), handler=type(handler).__name__)
+                                    break
+
+                except asyncio.CancelledError:
+                    log.info("Manual polling loop cancelled")
+                    raise
+                except Exception as e:
+                    log.warning("Manual polling loop error", error=str(e))
+                    await asyncio.sleep(5)
