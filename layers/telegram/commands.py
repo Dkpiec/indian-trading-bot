@@ -29,6 +29,16 @@ log = structlog.get_logger(__name__)
 
 def register_handlers(app: Application, bot_manager: BotManager) -> None:
     """Register all command handlers on the given Application."""
+    from telegram.ext import MessageHandler, filters
+
+    # Debug catch-all: logs EVERY update before command handlers see it
+    async def _debug_catch_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id if update.effective_chat else "?"
+        text = update.message.text if update.message else "(non-text)"
+        log.info("DEBUG_CATCH_ALL received update", chat_id=chat_id, text=text[:80], update_id=update.update_id)
+
+    app.add_handler(MessageHandler(filters.ALL, _debug_catch_all), group=-1)
+
     commands = {
         "catalog": cmd_catalog,
         "subscribe": cmd_subscribe,
