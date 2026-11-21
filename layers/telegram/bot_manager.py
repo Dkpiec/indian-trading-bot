@@ -343,7 +343,7 @@ class BotManager:
                         params={"offset": current_offset, "timeout": 1},
                     )
                     if poll_count <= 5:
-                        print(f"MANUAL_POLL HTTP {resp.status_code} body={resp.text[:300]}", flush=True)
+                                        print(f"MANUAL_POLL HTTP {resp.status_code} headers={dict(resp.headers)} body={resp.text[:300]}", flush=True)
                     data = resp.json()
                     updates = data.get("result", [])
                     if updates:
