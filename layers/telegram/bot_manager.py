@@ -329,27 +329,41 @@ class BotManager:
                     )
                     data = resp.json()
                     updates = data.get("result", [])
+                    if updates:
+                        print(f"MANUAL_POLL got {len(updates)} updates, first_id={updates[0].get('update_id')}", flush=True)
 
                     for update in updates:
                         update_id = update.get("update_id", 0)
                         offset = update_id + 1
+                        msg_text = update.get("message", {}).get("text", "")
+                        print(f"MANUAL_POLL processing update_id={update_id} text={msg_text!r}", flush=True)
 
                         # Build a PTB Update object manually
                         from telegram import Update as PTBUpdate
                         from telegram.ext import CallbackContext
-                        ptb_update = PTBUpdate.de_json(update, context=CallbackContext(app, None))
+                        ptb_update = PTBUpdate.de_json(update, bot=app.bot)
+                        print(f"MANUAL_POLL de_json ok type={type(ptb_update).__name__} has_cmd={ptb_update.message is not None}", flush=True)
 
                         # Find matching handler in app.handlers
-                        for handler_group in app.handlers.values():
+                        matched = False
+                        for group_idx, (group_key, handler_group) in enumerate(app.handlers.items()):
                             for handler in handler_group:
                                 try:
-                                    if handler.check_update(ptb_update):
-                                        context = await app.create_callback_context(ptb_update)
+                                    check = handler.check_update(ptb_update)
+                                    if check is not None and check is not False:
+                                        print(f"MANUAL_POLL MATCHED handler={type(handler).__name__} group={group_key}", flush=True)
+                                        context = CallbackContext(app, chat_id=ptb_update.effective_chat.id if ptb_update.effective_chat else None, user_id=ptb_update.effective_user.id if ptb_update.effective_user else None)
                                         await handler.callback(ptb_update, context)
+                                        matched = True
                                         break
                                 except Exception as e:
+                                    print(f"MANUAL_POLL DISPATCH ERROR handler={type(handler).__name__} err={e}", flush=True)
                                     log.error("Handler dispatch error", error=str(e), handler=type(handler).__name__)
                                     break
+                            if matched:
+                                break
+                        if not matched:
+                            print(f"MANUAL_POLL NO MATCH for text={msg_text!r} handlers_groups={list(app.handlers.keys())}", flush=True)
 
                 except asyncio.CancelledError:
                     log.info("Manual polling loop cancelled")
