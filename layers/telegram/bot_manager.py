@@ -231,23 +231,37 @@ class BotManager:
     async def _build_application(self, token: str) -> Application:
         """Build, configure, and start a new Application for the given token."""
         from layers.telegram.commands import register_handlers
+        from telegram import Update
+        from telegram.ext import ContextTypes
 
         app = ApplicationBuilder().token(token).build()
+
+        # Global error handler — logs ANY unhandled exception during update processing
+        async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+            log.error(
+                "Telegram update processing error",
+                error=str(context.error),
+                update_type=type(update).__name__,
+                chat_id=getattr(getattr(update, 'effective_chat', None), 'id', '?'),
+            )
+
+        app.add_error_handler(_error_handler)
 
         # Register all command handlers with user-routing wrapper
         register_handlers(app, self)
 
-        # Set the bot's command menu
+        # Initialize FIRST (makes app.bot available), then set menu, then start
+        await app.initialize()
+
         try:
             await app.bot.set_my_commands(MENU_COMMANDS)
         except Exception as e:
             log.warning("Failed to set bot commands menu", error=str(e))
 
-        # Initialize and start polling
-        await app.initialize()
         await app.start()
         await app.updater.start_polling(drop_pending_updates=False)
 
+        log.info("Bot polling started successfully", token_prefix=token[:10])
         return app
 
     async def _count_users_with_token(self, token: str) -> int:
