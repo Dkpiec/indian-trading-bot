@@ -51,9 +51,13 @@ def _wrap(handler, bot_manager: BotManager):
 
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_chat:
+            log.debug("Update received with no effective_chat")
             return
 
         chat_id = str(update.effective_chat.id)
+        text = update.message.text if update.message else "(no message)"
+        log.info("Incoming Telegram update", chat_id=chat_id, text=text[:50])
+
         user_id = await bot_manager.resolve_user_id(chat_id)
 
         # Fallback: if chat_id matches the configured system chat, accept as system user

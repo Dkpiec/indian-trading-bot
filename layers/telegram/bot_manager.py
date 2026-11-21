@@ -246,7 +246,7 @@ class BotManager:
         # Initialize and start polling
         await app.initialize()
         await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
+        await app.updater.start_polling(drop_pending_updates=False)
 
         return app
 
