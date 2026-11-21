@@ -238,7 +238,7 @@ class BotManager:
         from layers.telegram.commands import register_handlers
         from telegram.ext import ContextTypes
 
-        app = ApplicationBuilder().token(token).build()
+        app = Application.builder().token(token).build()
 
         # Global error handler — logs ANY unhandled exception during update processing
         async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
