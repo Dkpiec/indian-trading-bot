@@ -321,12 +321,18 @@ class BotManager:
         log.info("Manual polling loop started", token_prefix=token[:10])
 
         async with httpx.AsyncClient(timeout=30.0) as client:
+            poll_count = 0
             while self._apps.get(token) is app:
+                poll_count += 1
+                if poll_count <= 3 or poll_count % 20 == 0:
+                    print(f"MANUAL_POLL tick #{poll_count} offset={offset}", flush=True)
                 try:
                     resp = await client.get(
                         f"{base_url}/bot{token}/getUpdates",
-                        params={"offset": offset, "timeout": 10, "long_polling": "false"},
+                        params={"offset": offset, "timeout": 10},
                     )
+                    if poll_count <= 3:
+                        print(f"MANUAL_POLL HTTP {resp.status_code} body_len={len(resp.content)}", flush=True)
                     data = resp.json()
                     updates = data.get("result", [])
                     if updates:
