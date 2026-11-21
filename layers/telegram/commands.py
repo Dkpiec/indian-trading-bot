@@ -64,6 +64,7 @@ def _wrap(handler, bot_manager: BotManager):
     """Wrap a command handler to inject user_id and enforce authorization."""
 
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        print(f"WRAP_CALLED update_type={type(update).__name__} has_chat={update.effective_chat is not None}", flush=True)
         if not update.effective_chat:
             log.debug("Update received with no effective_chat")
             return
