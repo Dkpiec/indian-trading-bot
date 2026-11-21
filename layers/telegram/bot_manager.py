@@ -329,7 +329,7 @@ class BotManager:
                 try:
                     resp = await client.get(
                         f"{base_url}/bot{token}/getUpdates",
-                        params={"offset": offset, "timeout": 10},
+                        params={"offset": offset, "timeout": 1},
                     )
                     if poll_count <= 3:
                         print(f"MANUAL_POLL HTTP {resp.status_code} body_len={len(resp.content)}", flush=True)
