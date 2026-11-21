@@ -56,12 +56,25 @@ def _wrap(handler, bot_manager: BotManager):
         chat_id = str(update.effective_chat.id)
         user_id = await bot_manager.resolve_user_id(chat_id)
 
+        # Fallback: if chat_id matches the configured system chat, accept as system user
         if not user_id:
-            await update.message.reply_text(
-                "⚠️ Unauthorized. Please connect your bot via the web dashboard first."
-            )
-            log.warning("Unauthorized Telegram command", chat_id=chat_id)
-            return
+            from core.config import settings
+            configured_chat = str(settings.telegram_chat_id).strip('"').strip("'")
+            if chat_id == configured_chat:
+                user_id = "system"
+                log.info("Chat accepted via configured TELEGRAM_CHAT_ID fallback", chat_id=chat_id)
+            else:
+                log.warning(
+                    "Unauthorized Telegram command — no mapping found",
+                    chat_id=chat_id,
+                    configured_chat=configured_chat,
+                    redis_keys_checked=True,
+                )
+                if update.message:
+                    await update.message.reply_text(
+                        "⚠️ Unauthorized. Chat ID not recognized."
+                    )
+                return
 
         # Inject user_id into context for the handler
         context.user_data["user_id"] = user_id  # type: ignore[index]
