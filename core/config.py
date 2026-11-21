@@ -25,8 +25,13 @@ class Settings(BaseSettings):
     # Broker defaults
     upstox_api_key: str = ""
     upstox_api_secret: str = ""
+    upstox_access_token: str = ""
     dhan_client_id: str = ""
     dhan_access_token: str = ""
+
+    # Telegram (user's trading bot)
+    trading_telegram_bot_token: str = ""
+    telegram_allowed_users: str = ""
 
     # Balance floor
     balance_floor_pct: float = 0.20  # 20% of total balance

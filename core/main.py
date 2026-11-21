@@ -96,7 +96,72 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("Migration skipped or failed", error=str(e))
 
-    # Start strategy supervisor loop (background task)
+    # ------------------------------------------------------------------
+    # Broker clients (real credentials from env / coolify.env)
+    # ------------------------------------------------------------------
+    from layers.brokers.upstox_client import UpstoxClient
+    from layers.brokers.dhan_client import DhanClient
+
+    upstox_client = None
+    dhan_client = None
+
+    if settings.upstox_access_token:
+        upstox_client = UpstoxClient(access_token=settings.upstox_access_token)
+        log.info("Upstox REST client initialized")
+    else:
+        log.warning("UPSTOX_ACCESS_TOKEN not set — Upstox REST disabled")
+
+    if settings.dhan_access_token and settings.dhan_client_id:
+        dhan_client = DhanClient(
+            client_id=settings.dhan_client_id,
+            access_token=settings.dhan_access_token,
+        )
+        log.info("Dhan REST client initialized")
+    else:
+        log.warning("DHAN credentials incomplete — Dhan REST disabled")
+
+    app.state.upstox_client = upstox_client
+    app.state.dhan_client = dhan_client
+
+    # ------------------------------------------------------------------
+    # Upstox v3 WebSocket streamer (async wrapper)
+    # ------------------------------------------------------------------
+    from layers.brokers.upstox_ws_v3 import UpstoxWSV3
+
+    upstox_ws = None
+    if settings.upstox_access_token:
+        upstox_ws = UpstoxWSV3(access_token=settings.upstox_access_token)
+        # Don't start streaming yet — subscribe when strategies arm
+        log.info("Upstox v3 WS adapter ready (not yet connected)")
+    app.state.upstox_ws = upstox_ws
+
+    # ------------------------------------------------------------------
+    # Telegram bot (user's trading bot token)
+    # ------------------------------------------------------------------
+    from layers.telegram.bot_manager import BotManager
+
+    redis = await get_redis()
+    bot_manager = BotManager(session_factory=async_session_factory, redis=redis)
+    app.state.bot_manager = bot_manager
+
+    tg_token = settings.trading_telegram_bot_token
+    tg_chat = settings.telegram_chat_id
+    if tg_token and tg_chat:
+        try:
+            await bot_manager.start_bot(
+                user_id="system",
+                token=tg_token,
+                chat_id=tg_chat,
+            )
+            log.info("Telegram trading bot started", chat_id=tg_chat)
+        except Exception as e:
+            log.error("Telegram bot start failed", error=str(e))
+    else:
+        log.warning("TRADING_TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — bot disabled")
+
+    # ------------------------------------------------------------------
+    # Strategy supervisor loop (background task)
+    # ------------------------------------------------------------------
     app.state.supervisor_task = asyncio.create_task(_supervisor_loop())
     log.info("Strategy supervisor started")
 
@@ -108,6 +173,26 @@ async def lifespan(app: FastAPI):
         await app.state.supervisor_task
     except asyncio.CancelledError:
         pass
+
+    # Stop Telegram bot
+    if bot_manager:
+        try:
+            await bot_manager.stop_all()
+        except Exception as e:
+            log.warning("Bot manager shutdown error", error=str(e))
+
+    # Stop Upstox WS
+    if upstox_ws:
+        try:
+            await upstox_ws.stop()
+        except Exception as e:
+            log.warning("Upstox WS shutdown error", error=str(e))
+
+    # Close broker HTTP clients
+    if upstox_client:
+        await upstox_client.close()
+    if dhan_client:
+        await dhan_client.close()
 
     if _redis_pool:
         await _redis_pool.close()
