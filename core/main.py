@@ -147,7 +147,11 @@ async def lifespan(app: FastAPI):
     from layers.telegram.bot_manager import BotManager
 
     redis = await get_redis()
-    bot_manager = BotManager(session_factory=async_session_factory, redis=redis)
+    bot_manager = BotManager(
+        session_factory=async_session_factory,
+        redis=redis,
+        dhan_client=dhan_client,
+    )
     app.state.bot_manager = bot_manager
 
     tg_token = settings.trading_telegram_bot_token

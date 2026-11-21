@@ -54,9 +54,11 @@ class BotManager:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         redis: Redis,
+        dhan_client=None,
     ) -> None:
         self._session_factory = session_factory
         self._redis = redis
+        self._app_state_dhan_client = dhan_client
         # token → Application instance
         self._apps: dict[str, Application] = {}
         # token → set of user_ids currently using this token
