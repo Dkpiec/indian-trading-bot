@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+*.state.json
+wheelhouse/
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
