@@ -16,6 +16,12 @@ from core.security import MasterCredentialRouter
 log = structlog.get_logger(__name__)
 
 
+def _run_alembic_upgrade(cfg) -> None:
+    """Run alembic upgrade in a sync context (called from thread pool)."""
+    from alembic import command
+    command.upgrade(cfg, "head")
+
+
 # ---------------------------------------------------------------------------
 # Database + Redis setup
 # ---------------------------------------------------------------------------
@@ -58,13 +64,35 @@ async def lifespan(app: FastAPI):
     """Startup/shutdown hooks."""
     log.info("Indian Trading Bot starting", version="4.0.0")
 
-    # Run Alembic migrations on startup
+    # Run Alembic migrations on startup (async-safe: no asyncio.run())
     try:
-        from alembic.config import Config
-        from alembic import command
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-        log.info("Database migrations applied")
+        from sqlalchemy import text
+        async with engine.begin() as conn:
+            # Check if tables already exist (idempotent first-run check)
+            result = await conn.execute(text(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'users'"
+            ))
+            table_exists = result.scalar() == 1
+
+            if not table_exists:
+                # Run the initial migration directly (avoids alembic CLI's asyncio.run)
+                from alembic.config import Config
+                import asyncio as _asyncio
+                alembic_cfg = Config("alembic.ini")
+                alembic_cfg.set_main_option("sqlalchemy.url", settings.database_url)
+
+                # alembic command.upgrade is sync; run in a thread to avoid
+                # blocking the event loop and avoid nested asyncio.run()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    loop = _asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        pool,
+                        lambda: _run_alembic_upgrade(alembic_cfg)
+                    )
+                log.info("Database migrations applied")
+            else:
+                log.info("Tables already exist, skipping migration")
     except Exception as e:
         log.warning("Migration skipped or failed", error=str(e))
 
