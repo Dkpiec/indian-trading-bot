@@ -31,6 +31,9 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
     """Register all command handlers on the given Application."""
     from telegram.ext import MessageHandler, filters
 
+    # Store bot_manager in bot_data so handlers can access it via context.bot_data
+    app.bot_data["bot_manager"] = bot_manager
+
     # Debug catch-all: logs EVERY update before command handlers see it
     async def _debug_catch_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id if update.effective_chat else "?"
