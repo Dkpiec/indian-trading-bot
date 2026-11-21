@@ -38,6 +38,7 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
     async def _debug_catch_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id if update.effective_chat else "?"
         text = update.message.text if update.message else "(non-text)"
+        print(f"DEBUG_CATCH_ALL_PRINT: chat_id={chat_id} text={text[:80]} update_id={update.update_id}", flush=True)
         log.info("DEBUG_CATCH_ALL received update", chat_id=chat_id, text=text[:80], update_id=update.update_id)
 
     app.add_handler(MessageHandler(filters.ALL, _debug_catch_all), group=-1)
