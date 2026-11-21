@@ -330,17 +330,20 @@ class BotManager:
                 log.warning("Network diagnostic to api.telegram.org failed", error=str(diag_err))
 
             poll_count = 0
+            # Force-reset: use offset=-1 on first poll to grab any pending update
+            initial_offset = -1
             while self._apps.get(token) is app:
                 poll_count += 1
-                if poll_count <= 3 or poll_count % 20 == 0:
-                    print(f"MANUAL_POLL tick #{poll_count} offset={offset}", flush=True)
+                current_offset = initial_offset if poll_count == 1 else offset
+                if poll_count <= 5 or poll_count % 20 == 0:
+                    print(f"MANUAL_POLL tick #{poll_count} offset={current_offset}", flush=True)
                 try:
                     resp = await client.get(
                         f"{base_url}/bot{token}/getUpdates",
-                        params={"offset": offset, "timeout": 1},
+                        params={"offset": current_offset, "timeout": 1},
                     )
-                    if poll_count <= 3:
-                        print(f"MANUAL_POLL HTTP {resp.status_code} body_len={len(resp.content)}", flush=True)
+                    if poll_count <= 5:
+                        print(f"MANUAL_POLL HTTP {resp.status_code} body={resp.text[:300]}", flush=True)
                     data = resp.json()
                     updates = data.get("result", [])
                     if updates:
