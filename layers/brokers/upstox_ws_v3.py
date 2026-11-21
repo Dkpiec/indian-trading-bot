@@ -30,8 +30,9 @@ class UpstoxWSV3:
         await ws.stop()
     """
 
-    def __init__(self, *, access_token: str):
-        self._access_token = access_token
+    def __init__(self, *, access_token: str = "", analytics_token: str = ""):
+        # Prefer long-lived analytics token for v3 WS; fall back to short-lived access token
+        self._access_token = analytics_token or access_token
         self._queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=10_000)
         self._streamer = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     upstox_api_key: str = ""
     upstox_api_secret: str = ""
     upstox_access_token: str = ""
+    upstox_analytics_token: str = ""
     dhan_client_id: str = ""
     dhan_access_token: str = ""
 

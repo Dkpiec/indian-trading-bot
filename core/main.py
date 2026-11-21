@@ -129,10 +129,16 @@ async def lifespan(app: FastAPI):
     from layers.brokers.upstox_ws_v3 import UpstoxWSV3
 
     upstox_ws = None
-    if settings.upstox_access_token:
-        upstox_ws = UpstoxWSV3(access_token=settings.upstox_access_token)
+    ws_token = settings.upstox_analytics_token or settings.upstox_access_token
+    if ws_token:
+        upstox_ws = UpstoxWSV3(
+            access_token=settings.upstox_access_token,
+            analytics_token=settings.upstox_analytics_token,
+        )
         # Don't start streaming yet — subscribe when strategies arm
-        log.info("Upstox v3 WS adapter ready (not yet connected)")
+        log.info("Upstox v3 WS adapter ready (not yet connected)", token_type="analytics" if settings.upstox_analytics_token else "access")
+    else:
+        log.warning("No Upstox token available — v3 WS disabled")
     app.state.upstox_ws = upstox_ws
 
     # ------------------------------------------------------------------
