@@ -55,6 +55,7 @@ def upgrade() -> None:
         sa.Column("email", sa.String(256), nullable=False),
         sa.Column("password_hash", sa.Text(), nullable=False),
         sa.Column("telegram_token", sa.Text(), nullable=True),
+        sa.Column("telegram_token_hash", sa.String(64), nullable=True),
         sa.Column("telegram_chat_id", sa.String(64), nullable=True),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default="true"),
         sa.Column("master_override_active", sa.Boolean(), nullable=False, server_default="false"),
@@ -274,6 +275,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("user_id", "trade_date", name="uq_daily_pnl_user_date"),
     )
     op.create_index("idx_daily_pnl_user_date", "daily_pnl", ["user_id", "trade_date"])
+    op.create_index("ix_users_telegram_token_hash", "users", ["telegram_token_hash"], unique=False)
 
     # -- risk_limits
     op.create_table(

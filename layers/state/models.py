@@ -37,6 +37,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(256), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     telegram_token: Mapped[str | None] = mapped_column(Text, nullable=True)  # Fernet-encrypted
+    telegram_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # SHA-256 for O(1) lookup
     telegram_chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     master_override_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
