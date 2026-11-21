@@ -231,17 +231,14 @@ class BotManager:
     async def _build_application(self, token: str) -> Application:
         """Build, configure, and start a new Application for the given token.
 
-        PTB v21+ requires: build() → initialize() → add_handler() → start() → start_polling().
-        Handlers added before initialize() are silently ignored by the dispatcher.
+        PTB v21.9: handlers MUST be added BEFORE initialize() for the dispatcher
+        to register them. Post-initialize add_handler() silently fails in some
+        async contexts (observed in containerized uvicorn deployments).
         """
         from layers.telegram.commands import register_handlers
-        from telegram import Update
         from telegram.ext import ContextTypes
 
         app = ApplicationBuilder().token(token).build()
-
-        # Initialize FIRST — makes dispatcher and app.bot available
-        await app.initialize()
 
         # Global error handler — logs ANY unhandled exception during update processing
         async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -254,9 +251,12 @@ class BotManager:
 
         app.add_error_handler(_error_handler)
 
-        # Register handlers AFTER initialize (PTB v21+ requirement)
+        # Register handlers BEFORE initialize (required for dispatcher to pick them up)
         register_handlers(app, self)
-        log.info("Handlers registered after initialize", token_prefix=token[:10])
+        log.info("Handlers registered before initialize", token_prefix=token[:10])
+
+        # Now initialize, set menu, start, and poll
+        await app.initialize()
 
         try:
             await app.bot.set_my_commands(MENU_COMMANDS)
