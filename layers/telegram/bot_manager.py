@@ -231,38 +231,45 @@ class BotManager:
     async def _build_application(self, token: str) -> Application:
         """Build, configure, and start a new Application for the given token.
 
-        PTB v21.9: handlers MUST be added BEFORE initialize() for the dispatcher
-        to register them. Post-initialize add_handler() silently fails in some
-        async contexts (observed in containerized uvicorn deployments).
+        PTB v21.9 + uvicorn: use post_init callback to register handlers.
+        Direct add_handler() before or after initialize() silently fails
+        in containerized async deployments; post_init is the supported hook.
         """
         from layers.telegram.commands import register_handlers
         from telegram.ext import ContextTypes
 
-        app = Application.builder().token(token).build()
+        bot_mgr_ref = self  # capture for closure
 
-        # Global error handler — logs ANY unhandled exception during update processing
-        async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-            log.error(
-                "Telegram update processing error",
-                error=str(context.error),
-                update_type=type(update).__name__,
-                chat_id=getattr(getattr(update, 'effective_chat', None), 'id', '?'),
-            )
+        async def _post_init(app: Application) -> None:
+            """Called by PTB after initialize(), before start(). Safe place to add handlers."""
+            # Global error handler
+            async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+                log.error(
+                    "Telegram update processing error",
+                    error=str(context.error),
+                    update_type=type(update).__name__,
+                    chat_id=getattr(getattr(update, 'effective_chat', None), 'id', '?'),
+                )
+            app.add_error_handler(_error_handler)
 
-        app.add_error_handler(_error_handler)
+            # Register all command handlers
+            register_handlers(app, bot_mgr_ref)
+            log.info("Handlers registered via post_init", token_prefix=token[:10])
 
-        # Register handlers BEFORE initialize (required for dispatcher to pick them up)
-        register_handlers(app, self)
-        log.info("Handlers registered before initialize", token_prefix=token[:10])
+            # Set bot menu commands
+            try:
+                await app.bot.set_my_commands(MENU_COMMANDS)
+            except Exception as e:
+                log.warning("Failed to set bot commands menu", error=str(e))
 
-        # Now initialize, set menu, start, and poll
+        app = (
+            Application.builder()
+            .token(token)
+            .post_init(_post_init)
+            .build()
+        )
+
         await app.initialize()
-
-        try:
-            await app.bot.set_my_commands(MENU_COMMANDS)
-        except Exception as e:
-            log.warning("Failed to set bot commands menu", error=str(e))
-
         await app.start()
         await app.updater.start_polling(drop_pending_updates=False)
 
