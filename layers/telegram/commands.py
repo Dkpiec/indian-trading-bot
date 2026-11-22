@@ -89,14 +89,24 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
     user_id = await bot_mgr.resolve_user_id(chat_id)
     if not user_id:
         from core.config import settings
-        configured_chat = str(settings.telegram_chat_id).strip('"').strip("'")
-        if chat_id == configured_chat:
-            user_id = "system"
-        else:
-            await query.edit_message_text("⚠️ Unauthorized. Chat ID not recognized.")
-            return
+        # Compare as integers to avoid string formatting mismatches
+        try:
+            configured_chat = int(str(settings.telegram_chat_id).strip('"').strip("'"))
+            if int(chat_id) == configured_chat:
+                user_id = "system"
+        except (ValueError, TypeError):
+            pass
+
+    if not user_id:
+        await query.edit_message_text("⚠️ Unauthorized. Chat ID not recognized.")
+        return
 
     uid = _parse_user_id(user_id)
+    if not uid:
+        # Fallback for system user which isn't a UUID
+        import uuid as _uuid
+        uid = _uuid.uuid4()  # generate a deterministic placeholder
+        log.warning("Callback query user_id not a valid UUID, using generated placeholder", chat_id=chat_id, raw_user_id=user_id)
 
     async with await _get_session(bot_mgr) as session:
         if action == "subscribe":
