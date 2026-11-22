@@ -321,8 +321,10 @@ def _wrap(handler, bot_manager: BotManager):
                         await reg_session.commit()
                         log.info("Auto-registered user via _wrap", uid=str(uid), chat_id=chat_id)
             except Exception as reg_err:
-                log.warning("User auto-registration in _wrap failed", error=str(reg_err))
+                log.warning("User auto-registration in _wrap failed (non-fatal)", error=str(reg_err))
             # Store the UUID string so handlers can use it consistently
+            # This MUST happen even if DB registration failed — ConversationHandler
+            # and credential commands don't require a DB row to function.
             user_id = str(uid)
 
         # Inject user_id into context for the handler
