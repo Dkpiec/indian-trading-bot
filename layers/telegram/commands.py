@@ -289,7 +289,15 @@ def _wrap(handler, bot_manager: BotManager):
             await handler(update, context)
         except Exception as e:
             log.error("Command handler error", command=handler.__name__, error=str(e), user_id=user_id)
-            await update.message.reply_text(f"❌ Error: {e}")
+            # Safely reply: update.message may be None for callback queries or edge cases
+            target = update.message or update.callback_query
+            if target:
+                try:
+                    await target.reply_text(f"❌ Error: {e}") if hasattr(target, "reply_text") and update.message else None
+                    if update.callback_query and not update.message:
+                        await update.callback_query.answer()
+                except Exception as reply_err:
+                    log.error("Failed to send error reply", error=str(reply_err))
 
     return wrapped
 
@@ -608,6 +616,20 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         balance = await dhan_client.get_balance()
+    except RuntimeError as e:
+        err_str = str(e)
+        if "401" in err_str or "Invalid_Authentication" in err_str:
+            log.error("Dhan auth token expired/invalid", user_id=user_id)
+            await update.message.reply_text(
+                "❌ *Dhan auth failed* (401 Invalid_Authentication)\n\n"
+                "The DHAN_ACCESS_TOKEN is expired or invalid.\n"
+                "Update DHAN_ACCESS_TOKEN in /opt/data/secrets/coolify.env and redeploy.",
+                parse_mode="Markdown",
+            )
+        else:
+            log.error("Balance fetch failed", error=err_str, user_id=user_id)
+            await update.message.reply_text(f"❌ Failed to fetch balance: {err_str}")
+        return
     except Exception as e:
         log.error("Balance fetch failed", error=str(e), user_id=user_id)
         await update.message.reply_text(f"❌ Failed to fetch balance: {e}")
