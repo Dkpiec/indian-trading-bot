@@ -108,13 +108,19 @@ async def lifespan(app: FastAPI):
                 await session.execute(_text("""
                     INSERT INTO strategy_catalog (id, display_name, description, plugin_file, underlying, segment, strategy_type, default_params, is_active, version, created_at, updated_at)
                     VALUES
-                    ('nifty-orb-v1', 'Nifty ORB v1', 'Opening Range Breakout on Nifty 50', 'nifty_orb_v1.py', 'NIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
-                    ('banknifty-momentum-v1', 'BankNifty Momentum v1', 'Momentum breakout on BankNifty', 'banknifty_momentum_v1.py', 'BANKNIFTY', 'NSE_FNO', 'momentum', '{}', true, '1.0', NOW(), NOW()),
-                    ('nifty-mean-revert-v1', 'Nifty Mean Reversion v1', 'Mean reversion on Nifty 50', 'nifty_mean_revert_v1.py', 'NIFTY', 'NSE_FNO', 'mean_reversion', '{}', true, '1.0', NOW(), NOW())
+                    ('dhan_v6e_nifty', 'NIFTY ORB v6e (CE)', 'NIFTY ORB v6e CE leg', 'dhan_v6e_nifty.py', 'NIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
+                    ('dhan_v6e_nifty_pe', 'NIFTY ORB v6e (PE)', 'NIFTY ORB v6e PE leg', 'dhan_v6e_nifty_pe.py', 'NIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
+                    ('nifty_slhunt_reversal', 'NIFTY SL-Hunt v4.1b (CE)', 'NIFTY SL-Hunt v4.1b CE leg', 'nifty_slhunt_reversal.py', 'NIFTY', 'NSE_FNO', 'slhunt', '{}', true, '1.0', NOW(), NOW()),
+                    ('orb_banknifty_fyers', 'BankNifty ORB Invalidation v2 (DHAN CE)', 'BankNifty ORB Invalidation v2 CE — monthly only', 'orb_banknifty_fyers.py', 'BANKNIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
+                    ('orb_banknifty_fyers_pe', 'BankNifty ORB Invalidation v2 (DHAN PE)', 'BankNifty ORB Invalidation v2 PE — monthly only', 'orb_banknifty_fyers_pe.py', 'BANKNIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
+                    ('orb_sensex_dhan', 'Sensex ORB Invalidation (DHAN CE)', 'Sensex ORB Invalidation CE leg', 'orb_sensex_dhan.py', 'SENSEX', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
+                    ('orb_sensex_dhan_pe', 'SENSEX ORB Invalidation v5 (Dhan PE)', 'SENSEX ORB Invalidation v5 PE leg', 'orb_sensex_dhan_pe.py', 'SENSEX', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
+                    ('sensex_slhunt_ce', 'SENSEX SL-Hunt V4.1g (CE)', 'SENSEX SL-Hunt V4.1g CE leg', 'sensex_slhunt_ce.py', 'SENSEX', 'NSE_FNO', 'slhunt', '{}', true, '1.0', NOW(), NOW()),
+                    ('sensex_slhunt_pe', 'SENSEX SL-Hunt V4.1g (PE)', 'SENSEX SL-Hunt V4.1g PE leg', 'sensex_slhunt_pe.py', 'SENSEX', 'NSE_FNO', 'slhunt', '{}', true, '1.0', NOW(), NOW())
                     ON CONFLICT (id) DO NOTHING
                 """))
                 await session.commit()
-                log.info("Seeded 3 sample strategies into catalog")
+                log.info("Seeded 9 live Dhan strategies into catalog from Hermes multi-broker engine")
             else:
                 log.info(f"Strategy catalog already has {count} entries, skipping seed")
     except Exception as e:
