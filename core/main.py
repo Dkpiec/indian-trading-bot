@@ -102,6 +102,14 @@ async def lifespan(app: FastAPI):
     try:
         from sqlalchemy import text as _text
         async with async_session_factory() as session:
+            # Clear any stale sample strategies that don't match live roster
+            await session.execute(_text("""
+                DELETE FROM strategy_catalog WHERE id IN (
+                    'nifty-orb-v1', 'banknifty-momentum-v1', 'nifty-mean-revert-v1'
+                )
+            """))
+            await session.commit()
+
             result = await session.execute(_text("SELECT COUNT(*) FROM strategy_catalog"))
             count = result.scalar() or 0
             if count == 0:
