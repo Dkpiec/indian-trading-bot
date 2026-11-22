@@ -79,7 +79,9 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
     app.add_handler(cred_conv)
 
     # Inline keyboard callback handlers
-    app.add_handler(CallbackQueryHandler(_handle_broker_callback, pattern=r"^(refresh:|cred_)"))
+    # NOTE: cred_ callbacks are handled INSIDE the ConversationHandler above;
+    # do NOT match them here or the conversation handler will never see them.
+    app.add_handler(CallbackQueryHandler(_handle_broker_callback, pattern=r"^refresh:"))
     app.add_handler(CallbackQueryHandler(_callback_query_handler))
 
 
@@ -1113,43 +1115,40 @@ async def cmd_refresh_token_async(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def _handle_broker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline keyboard callbacks for broker selection and refresh triggers."""
+    """Handle inline keyboard callbacks for refresh triggers only.
+    
+    NOTE: cred_* callbacks are handled by the /credentials ConversationHandler.
+    Do NOT add cred_ matching here or the conversation handler will never see them.
+    """
     query = update.callback_query
     if not query or not query.data:
         return
 
+    if not query.data.startswith("refresh:"):
+        return  # Not our callback; let other handlers process it
+
     await query.answer()
     data = query.data
+    broker = data.split(":", 1)[1]
+    if broker not in SUPPORTED_BROKERS:
+        await query.edit_message_text(f"❌ Unknown broker: {broker}")
+        return
 
-    # --- Refresh trigger: refresh:{broker} ---
-    if data.startswith("refresh:"):
-        broker = data.split(":", 1)[1]
-        if broker not in SUPPORTED_BROKERS:
-            await query.edit_message_text(f"❌ Unknown broker: {broker}")
-            return
-
-        creds = await _load_credentials(broker)
-        if not creds:
-            await query.edit_message_text(
-                f"❌ No credentials stored for *{SUPPORTED_BROKERS[broker]['name']}*.\n"
-                f"Run /credentials first to save them.",
-                parse_mode="Markdown",
-            )
-            return
-
+    creds = await _load_credentials(broker)
+    if not creds:
         await query.edit_message_text(
-            f"🔄 Refreshing *{SUPPORTED_BROKERS[broker]['name']}* token in background...\n"
-            f"_(FYERS can take up to 5 minutes; Dhan ~30s)_",
+            f"❌ No credentials stored for *{SUPPORTED_BROKERS[broker]['name']}*.\n"
+            f"Run /credentials first to save them.",
             parse_mode="Markdown",
         )
-        asyncio.create_task(_run_refresh_in_background(broker, creds, query))
         return
 
-    # --- Credential broker selection (part of /credentials conversation) ---
-    if data.startswith("cred_broker:") or data == "cred_cancel":
-        # Forward to the conversation handler via user_data context
-        # The CallbackQueryHandler registered in the conversation will pick this up
-        return
+    await query.edit_message_text(
+        f"🔄 Refreshing *{SUPPORTED_BROKERS[broker]['name']}* token in background...\n"
+        f"_(FYERS can take up to 5 minutes; Dhan ~30s)_",
+        parse_mode="Markdown",
+    )
+    asyncio.create_task(_run_refresh_in_background(broker, creds, query))
 
 
 async def _run_refresh_in_background(
