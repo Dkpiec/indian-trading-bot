@@ -97,6 +97,30 @@ async def lifespan(app: FastAPI):
         log.warning("Migration skipped or failed", error=str(e))
 
     # ------------------------------------------------------------------
+    # Seed strategy catalog if empty
+    # ------------------------------------------------------------------
+    try:
+        from sqlalchemy import text as _text
+        async with async_session_factory() as session:
+            result = await session.execute(_text("SELECT COUNT(*) FROM strategy_catalog"))
+            count = result.scalar() or 0
+            if count == 0:
+                await session.execute(_text("""
+                    INSERT INTO strategy_catalog (id, display_name, strategy_type, underlying, version, is_active, description, created_at, updated_at)
+                    VALUES
+                    ('nifty-orb-v1', 'Nifty ORB v1', 'orb', 'NIFTY', '1.0', true, 'Opening Range Breakout on Nifty 50', NOW(), NOW()),
+                    ('banknifty-momentum-v1', 'BankNifty Momentum v1', 'momentum', 'BANKNIFTY', '1.0', true, 'Momentum breakout on BankNifty', NOW(), NOW()),
+                    ('nifty-mean-revert-v1', 'Nifty Mean Reversion v1', 'mean_reversion', 'NIFTY', '1.0', true, 'Mean reversion on Nifty 50', NOW(), NOW())
+                    ON CONFLICT (id) DO NOTHING
+                """))
+                await session.commit()
+                log.info("Seeded 3 sample strategies into catalog")
+            else:
+                log.info(f"Strategy catalog already has {count} entries, skipping seed")
+    except Exception as e:
+        log.warning("Strategy catalog seed skipped", error=str(e))
+
+    # ------------------------------------------------------------------
     # Broker clients (real credentials from env / coolify.env)
     # ------------------------------------------------------------------
     from layers.brokers.upstox_client import UpstoxClient
