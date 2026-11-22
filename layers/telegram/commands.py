@@ -246,7 +246,7 @@ def _parse_user_id(user_id: str) -> uuid.UUID | None:
 # ---------------------------------------------------------------------------
 
 
-async def _build_strategy_keyboard(action: str, strategies) -> InlineKeyboardMarkup:
+def _build_strategy_keyboard(action: str, strategies) -> InlineKeyboardMarkup:
     """Build an inline keyboard with one button per strategy for the given action."""
     buttons = []
     for s in strategies:
