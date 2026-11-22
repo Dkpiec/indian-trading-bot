@@ -329,7 +329,8 @@ def _wrap(handler, bot_manager: BotManager):
         context.user_data["user_id"] = user_id  # type: ignore[index]
 
         try:
-            await handler(update, context)
+            result = await handler(update, context)
+            return result  # Pass through return value (required by ConversationHandler)
         except Exception as e:
             log.error("Command handler error", command=handler.__name__, error=str(e), user_id=user_id)
             # Safely reply: update.message may be None for callback queries or edge cases
