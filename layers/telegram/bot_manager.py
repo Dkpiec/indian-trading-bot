@@ -370,15 +370,35 @@ class BotManager:
                                     check = handler.check_update(ptb_update)
                                     if check is not None and check is not False:
                                         print(f"MANUAL_POLL MATCHED handler={type(handler).__name__} group={group_key}", flush=True)
-                                        context = CallbackContext(
-                                            application=app,
-                                            chat_id=ptb_update.effective_chat.id if ptb_update.effective_chat else None,
-                                            user_id=ptb_update.effective_user.id if ptb_update.effective_user else None,
-                                        )
-                                        await handler.callback(ptb_update, context)
+                                        # Build a proper CallbackContext with all required attributes
+                                        context = CallbackContext(application=app)
+                                        # Ensure user_data and bot_data dicts exist
+                                        if not hasattr(context, 'user_data') or context.user_data is None:
+                                            context._user_data = {}
+                                        if not hasattr(context, 'bot_data') or context.bot_data is None:
+                                            context._bot_data = dict(app.bot_data)
+                                        # Parse command args from message text
+                                        if ptb_update.message and ptb_update.message.text:
+                                            parts = ptb_update.message.text.strip().split()
+                                            context._args = parts[1:] if len(parts) > 1 else []
+                                        else:
+                                            context._args = []
+                                        try:
+                                            await handler.callback(ptb_update, context)
+                                        except Exception as cb_err:
+                                            print(f"MANUAL_POLL CALLBACK ERROR handler={type(handler).__name__} err={cb_err}", flush=True)
+                                            import traceback
+                                            traceback.print_exc()
+                                            if ptb_update.message:
+                                                try:
+                                                    await ptb_update.message.reply_text(f"❌ Error: {cb_err}")
+                                                except Exception:
+                                                    pass
                                         any_matched = True
                                 except Exception as e:
                                     print(f"MANUAL_POLL DISPATCH ERROR handler={type(handler).__name__} group={group_key} err={e}", flush=True)
+                                    import traceback
+                                    traceback.print_exc()
                                     log.error("Handler dispatch error", error=str(e), handler=type(handler).__name__, group=group_key)
                         if not any_matched:
                             print(f"MANUAL_POLL NO MATCH for text={msg_text!r} handler_groups={sorted(app.handlers.keys())}", flush=True)
