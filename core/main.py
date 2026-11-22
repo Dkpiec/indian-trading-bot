@@ -102,10 +102,13 @@ async def lifespan(app: FastAPI):
     try:
         from sqlalchemy import text as _text
         async with async_session_factory() as session:
-            # Clear any stale sample strategies that don't match live roster
+            # Clear any stale sample/old strategies that don't match live roster
             await session.execute(_text("""
                 DELETE FROM strategy_catalog WHERE id IN (
-                    'nifty-orb-v1', 'banknifty-momentum-v1', 'nifty-mean-revert-v1'
+                    'nifty-orb-v1', 'banknifty-momentum-v1', 'nifty-mean-revert-v1',
+                    'dhan_v6e_nifty', 'dhan_v6e_nifty_pe', 'nifty_slhunt_reversal',
+                    'orb_banknifty_fyers', 'orb_banknifty_fyers_pe', 'orb_sensex_dhan',
+                    'orb_sensex_dhan_pe', 'sensex_slhunt_ce', 'sensex_slhunt_pe'
                 )
             """))
             await session.commit()
@@ -116,19 +119,15 @@ async def lifespan(app: FastAPI):
                 await session.execute(_text("""
                     INSERT INTO strategy_catalog (id, display_name, description, plugin_file, underlying, segment, strategy_type, default_params, is_active, version, created_at, updated_at)
                     VALUES
-                    ('dhan_v6e_nifty', 'NIFTY ORB v6e (CE)', 'NIFTY ORB v6e CE leg', 'dhan_v6e_nifty.py', 'NIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
-                    ('dhan_v6e_nifty_pe', 'NIFTY ORB v6e (PE)', 'NIFTY ORB v6e PE leg', 'dhan_v6e_nifty_pe.py', 'NIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
-                    ('nifty_slhunt_reversal', 'NIFTY SL-Hunt v4.1b (CE)', 'NIFTY SL-Hunt v4.1b CE leg', 'nifty_slhunt_reversal.py', 'NIFTY', 'NSE_FNO', 'slhunt', '{}', true, '1.0', NOW(), NOW()),
-                    ('orb_banknifty_fyers', 'BankNifty ORB Invalidation v2 (DHAN CE)', 'BankNifty ORB Invalidation v2 CE — monthly only', 'orb_banknifty_fyers.py', 'BANKNIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
-                    ('orb_banknifty_fyers_pe', 'BankNifty ORB Invalidation v2 (DHAN PE)', 'BankNifty ORB Invalidation v2 PE — monthly only', 'orb_banknifty_fyers_pe.py', 'BANKNIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
-                    ('orb_sensex_dhan', 'Sensex ORB Invalidation (DHAN CE)', 'Sensex ORB Invalidation CE leg', 'orb_sensex_dhan.py', 'SENSEX', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
-                    ('orb_sensex_dhan_pe', 'SENSEX ORB Invalidation v5 (Dhan PE)', 'SENSEX ORB Invalidation v5 PE leg', 'orb_sensex_dhan_pe.py', 'SENSEX', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
-                    ('sensex_slhunt_ce', 'SENSEX SL-Hunt V4.1g (CE)', 'SENSEX SL-Hunt V4.1g CE leg', 'sensex_slhunt_ce.py', 'SENSEX', 'NSE_FNO', 'slhunt', '{}', true, '1.0', NOW(), NOW()),
-                    ('sensex_slhunt_pe', 'SENSEX SL-Hunt V4.1g (PE)', 'SENSEX SL-Hunt V4.1g PE leg', 'sensex_slhunt_pe.py', 'SENSEX', 'NSE_FNO', 'slhunt', '{}', true, '1.0', NOW(), NOW())
+                    ('NIFTY101', 'NIFTY ORB v6e', 'NIFTY ORB v6e CE+PE legs', 'dhan_v6e_nifty.py', 'NIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '6e', NOW(), NOW()),
+                    ('NIFTY102', 'NIFTY SL-Hunt v4.1b', 'NIFTY SL-Hunt v4.1b CE leg', 'nifty_slhunt_reversal.py', 'NIFTY', 'NSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1b', NOW(), NOW()),
+                    ('BANKNIFTY101', 'BankNifty ORB v2', 'BankNifty ORB Invalidation v2 CE+PE monthly', 'orb_banknifty_fyers.py', 'BANKNIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '2', NOW(), NOW()),
+                    ('SENSEX101', 'SENSEX ORB Invalidation', 'SENSEX ORB Invalidation CE+PE legs', 'orb_sensex_dhan.py', 'SENSEX', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '5', NOW(), NOW()),
+                    ('SENSEX102', 'SENSEX SL-Hunt V4.1g', 'SENSEX SL-Hunt V4.1g CE+PE legs', 'sensex_slhunt_ce.py', 'SENSEX', 'NSE_FNO', 'slhunt', '{"legs":["CE","PE"]}', true, '4.1g', NOW(), NOW())
                     ON CONFLICT (id) DO NOTHING
                 """))
                 await session.commit()
-                log.info("Seeded 9 live Dhan strategies into catalog from Hermes multi-broker engine")
+                log.info("Seeded 5 merged strategies (CE+PE legs) from Hermes multi-broker engine")
             else:
                 log.info(f"Strategy catalog already has {count} entries, skipping seed")
     except Exception as e:

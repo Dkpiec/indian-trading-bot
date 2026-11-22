@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 
 import structlog
 from sqlalchemy import select, func
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from layers.telegram.bot_manager import BotManager
 from layers.state.models import (
@@ -58,6 +58,123 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
     }
     for name, handler in commands.items():
         app.add_handler(CommandHandler(name, _wrap(handler, bot_manager)))
+
+    # Inline keyboard callback handler for strategy selection menus
+    app.add_handler(CallbackQueryHandler(_callback_query_handler))
+
+
+async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline keyboard button presses for strategy selection."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    await query.answer()
+    data = query.data  # format: "action:strategy_id" e.g. "subscribe:NIFTY101"
+
+    parts = data.split(":", 1)
+    if len(parts) != 2:
+        await query.edit_message_text("❌ Invalid selection.")
+        return
+
+    action, strategy_id = parts[0], parts[1]
+
+    # Resolve user_id from chat
+    chat_id = str(query.message.chat.id)
+    bot_mgr = context.bot_data.get("bot_manager")
+    if not bot_mgr:
+        await query.edit_message_text("❌ Bot manager not available.")
+        return
+
+    user_id = await bot_mgr.resolve_user_id(chat_id)
+    if not user_id:
+        from core.config import settings
+        configured_chat = str(settings.telegram_chat_id).strip('"').strip("'")
+        if chat_id == configured_chat:
+            user_id = "system"
+        else:
+            await query.edit_message_text("⚠️ Unauthorized. Chat ID not recognized.")
+            return
+
+    uid = _parse_user_id(user_id)
+
+    async with await _get_session(bot_mgr) as session:
+        if action == "subscribe":
+            # Check if already subscribed
+            existing = await session.execute(
+                select(UserSubscription).where(
+                    UserSubscription.user_id == uid,
+                    UserSubscription.catalog_id == strategy_id,
+                )
+            )
+            if existing.scalar_one_or_none():
+                await query.edit_message_text(f"ℹ️ Already subscribed to `{strategy_id}`.", parse_mode="Markdown")
+                return
+            sub = UserSubscription(user_id=uid, catalog_id=strategy_id, is_armed=False)
+            session.add(sub)
+            await session.commit()
+            await query.edit_message_text(
+                f"✅ Subscribed to `{strategy_id}`.\nUse /arm to activate.",
+                parse_mode="Markdown",
+            )
+            log.info("Strategy subscribed via inline", user_id=user_id, strategy=strategy_id)
+
+        elif action == "unsubscribe":
+            result = await session.execute(
+                select(UserSubscription).where(
+                    UserSubscription.user_id == uid,
+                    UserSubscription.catalog_id == strategy_id,
+                )
+            )
+            sub = result.scalar_one_or_none()
+            if not sub:
+                await query.edit_message_text(f"❌ Not subscribed to `{strategy_id}`.", parse_mode="Markdown")
+                return
+            await session.delete(sub)
+            await session.commit()
+            await query.edit_message_text(f"🔕 Unsubscribed from `{strategy_id}`.", parse_mode="Markdown")
+            log.info("Strategy unsubscribed via inline", user_id=user_id, strategy=strategy_id)
+
+        elif action == "arm":
+            result = await session.execute(
+                select(UserSubscription).where(
+                    UserSubscription.user_id == uid,
+                    UserSubscription.catalog_id == strategy_id,
+                )
+            )
+            sub = result.scalar_one_or_none()
+            if not sub:
+                await query.edit_message_text(f"❌ Not subscribed to `{strategy_id}`. Subscribe first.", parse_mode="Markdown")
+                return
+            if sub.is_armed:
+                await query.edit_message_text(f"ℹ️ `{strategy_id}` is already armed.", parse_mode="Markdown")
+                return
+            sub.is_armed = True
+            await session.commit()
+            await query.edit_message_text(f"🟢 Armed `{strategy_id}`.", parse_mode="Markdown")
+            log.info("Strategy armed via inline", user_id=user_id, strategy=strategy_id)
+
+        elif action == "disarm":
+            result = await session.execute(
+                select(UserSubscription).where(
+                    UserSubscription.user_id == uid,
+                    UserSubscription.catalog_id == strategy_id,
+                )
+            )
+            sub = result.scalar_one_or_none()
+            if not sub:
+                await query.edit_message_text(f"❌ Not subscribed to `{strategy_id}`.", parse_mode="Markdown")
+                return
+            if not sub.is_armed:
+                await query.edit_message_text(f"ℹ️ `{strategy_id}` is already disarmed.", parse_mode="Markdown")
+                return
+            sub.is_armed = False
+            await session.commit()
+            await query.edit_message_text(f"🔴 Disarmed `{strategy_id}`.", parse_mode="Markdown")
+            log.info("Strategy disarmed via inline", user_id=user_id, strategy=strategy_id)
+
+        else:
+            await query.edit_message_text(f"❌ Unknown action: {action}")
 
 
 def _wrap(handler, bot_manager: BotManager):
@@ -129,11 +246,21 @@ def _parse_user_id(user_id: str) -> uuid.UUID | None:
 # ---------------------------------------------------------------------------
 
 
+async def _build_strategy_keyboard(action: str, strategies) -> InlineKeyboardMarkup:
+    """Build an inline keyboard with one button per strategy for the given action."""
+    buttons = []
+    for s in strategies:
+        label = f"{s.id} — {s.display_name}"
+        callback_data = f"{action}:{s.id}"
+        buttons.append([InlineKeyboardButton(label, callback_data=callback_data)])
+    return InlineKeyboardMarkup(buttons)
+
+
 async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Browse available strategies from the DB catalog."""
     async with await _get_session(context.bot_data["bot_manager"]) as session:
         result = await session.execute(
-            select(StrategyCatalog).where(StrategyCatalog.is_active == True).order_by(StrategyCatalog.display_name)  # noqa: E712
+            select(StrategyCatalog).where(StrategyCatalog.is_active == True).order_by(StrategyCatalog.id)  # noqa: E712
         )
         strategies = result.scalars().all()
 
@@ -143,95 +270,154 @@ async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     lines = ["📋 *Available Strategies:*", ""]
     for i, s in enumerate(strategies, 1):
-        # Escape Markdown special chars in display_name to avoid parse errors
-        safe_name = s.display_name.replace("(", "\\(").replace(")", "\\)").replace("-", "\\-")
-        lines.append(f"{i}. `{s.id}` — {safe_name}")
-        lines.append(f"   Type: {s.strategy_type} | Underlying: {s.underlying} | v{s.version}")
+        lines.append(f"{i}. *{s.id}* — {s.display_name}")
+        lines.append(f"   {s.underlying} | {s.strategy_type} | v{s.version}")
     lines.append("")
-    lines.append("Use /subscribe <strategy\\_id> to subscribe.")
+    lines.append("Use /subscribe, /arm, /disarm, /unsubscribe to manage.")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Subscribe to a strategy. Usage: /subscribe <strategy_id>"""
-    user_id = context.user_data["user_id"]  # type: ignore[index]
-    uid = _parse_user_id(user_id)
+    """Show strategy selection menu to subscribe."""
+    bot_mgr = context.bot_data["bot_manager"]
+    async with await _get_session(bot_mgr) as session:
+        result = await session.execute(
+            select(StrategyCatalog).where(StrategyCatalog.is_active == True).order_by(StrategyCatalog.id)  # noqa: E712
+        )
+        strategies = result.scalars().all()
 
-    if not context.args:
-        await update.message.reply_text("Usage: /subscribe <strategy_id>")
+    if not strategies:
+        await update.message.reply_text("📋 No active strategies available.")
         return
 
-    strategy_id = context.args[0]
-    bot_mgr = context.bot_data["bot_manager"]
-
-    async with await _get_session(bot_mgr) as session:
-        # Validate strategy exists
-        cat = await session.execute(
-            select(StrategyCatalog).where(StrategyCatalog.id == strategy_id, StrategyCatalog.is_active == True)  # noqa: E712
-        )
-        catalog_entry = cat.scalar_one_or_none()
-        if not catalog_entry:
-            await update.message.reply_text(f"❌ Strategy `{strategy_id}` not found or inactive.")
-            return
-
-        # Check if already subscribed
-        existing = await session.execute(
-            select(UserSubscription).where(
-                UserSubscription.user_id == uid,
-                UserSubscription.catalog_id == strategy_id,
-            )
-        )
-        if existing.scalar_one_or_none():
-            await update.message.reply_text(f"ℹ️ Already subscribed to `{strategy_id}`.")
-            return
-
-        # Create subscription
-        sub = UserSubscription(user_id=uid, catalog_id=strategy_id, is_armed=False)
-        session.add(sub)
-        await session.commit()
-
+    keyboard = _build_strategy_keyboard("subscribe", strategies)
     await update.message.reply_text(
-        f"✅ Subscribed to `{strategy_id}`.\nUse /arm {strategy_id} to activate.",
+        "📋 *Select a strategy to subscribe:*",
+        reply_markup=keyboard,
         parse_mode="Markdown",
     )
-    log.info("Strategy subscribed", user_id=user_id, strategy=strategy_id)
 
 
 async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Unsubscribe from a strategy. Usage: /unsubscribe <strategy_id>"""
+    """Show subscribed strategies selection menu to unsubscribe."""
     user_id = context.user_data["user_id"]  # type: ignore[index]
     uid = _parse_user_id(user_id)
+    bot_mgr = context.bot_data["bot_manager"]
 
-    if not context.args:
-        await update.message.reply_text("Usage: /unsubscribe <strategy_id>")
+    async with await _get_session(bot_mgr) as session:
+        result = await session.execute(
+            select(UserSubscription).where(UserSubscription.user_id == uid)
+        )
+        subs = result.scalars().all()
+
+    if not subs:
+        await update.message.reply_text("ℹ️ You have no subscriptions.")
         return
 
-    strategy_id = context.args[0]
+    # Fetch catalog entries for display names
+    cat_ids = [s.catalog_id for s in subs]
+    async with await _get_session(bot_mgr) as session:
+        cat_result = await session.execute(
+            select(StrategyCatalog).where(StrategyCatalog.id.in_(cat_ids))
+        )
+        catalog_map = {c.id: c for c in cat_result.scalars().all()}
+
+    buttons = []
+    for sub in subs:
+        cat = catalog_map.get(sub.catalog_id)
+        name = cat.display_name if cat else sub.catalog_id
+        label = f"{sub.catalog_id} — {name}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"unsubscribe:{sub.catalog_id}")])
+
+    await update.message.reply_text(
+        "🔕 *Select a strategy to unsubscribe:*",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_arm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show subscribed strategies selection menu to arm."""
+    user_id = context.user_data["user_id"]  # type: ignore[index]
+    uid = _parse_user_id(user_id)
     bot_mgr = context.bot_data["bot_manager"]
 
     async with await _get_session(bot_mgr) as session:
         result = await session.execute(
             select(UserSubscription).where(
                 UserSubscription.user_id == uid,
-                UserSubscription.catalog_id == strategy_id,
+                UserSubscription.is_armed == False,  # noqa: E712
             )
         )
-        sub = result.scalar_one_or_none()
-        if not sub:
-            await update.message.reply_text(f"❌ Not subscribed to `{strategy_id}`.")
-            return
+        subs = result.scalars().all()
 
-        await session.delete(sub)
-        await session.commit()
+    if not subs:
+        await update.message.reply_text("ℹ️ No disarmed subscriptions to arm.")
+        return
+
+    cat_ids = [s.catalog_id for s in subs]
+    async with await _get_session(bot_mgr) as session:
+        cat_result = await session.execute(
+            select(StrategyCatalog).where(StrategyCatalog.id.in_(cat_ids))
+        )
+        catalog_map = {c.id: c for c in cat_result.scalars().all()}
+
+    buttons = []
+    for sub in subs:
+        cat = catalog_map.get(sub.catalog_id)
+        name = cat.display_name if cat else sub.catalog_id
+        label = f"{sub.catalog_id} — {name}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"arm:{sub.catalog_id}")])
 
     await update.message.reply_text(
-        f"🔕 Unsubscribed from `{strategy_id}`.",
+        "🟢 *Select a strategy to arm:*",
+        reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
-    log.info("Strategy unsubscribed", user_id=user_id, strategy=strategy_id)
 
 
-async def cmd_arm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_disarm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show armed strategies selection menu to disarm."""
+    user_id = context.user_data["user_id"]  # type: ignore[index]
+    uid = _parse_user_id(user_id)
+    bot_mgr = context.bot_data["bot_manager"]
+
+    async with await _get_session(bot_mgr) as session:
+        result = await session.execute(
+            select(UserSubscription).where(
+                UserSubscription.user_id == uid,
+                UserSubscription.is_armed == True,  # noqa: E712
+            )
+        )
+        subs = result.scalars().all()
+
+    if not subs:
+        await update.message.reply_text("ℹ️ No armed subscriptions to disarm.")
+        return
+
+    cat_ids = [s.catalog_id for s in subs]
+    async with await _get_session(bot_mgr) as session:
+        cat_result = await session.execute(
+            select(StrategyCatalog).where(StrategyCatalog.id.in_(cat_ids))
+        )
+        catalog_map = {c.id: c for c in cat_result.scalars().all()}
+
+    buttons = []
+    for sub in subs:
+        cat = catalog_map.get(sub.catalog_id)
+        name = cat.display_name if cat else sub.catalog_id
+        label = f"{sub.catalog_id} — {name}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"disarm:{sub.catalog_id}")])
+
+    await update.message.reply_text(
+        "🔴 *Select a strategy to disarm:*",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
+# Legacy arg-based handlers kept as fallback (not used by inline menus)
+async def _cmd_arm_legacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Arm a subscribed strategy for live execution. Usage: /arm <strategy_id>"""
     user_id = context.user_data["user_id"]  # type: ignore[index]
     uid = _parse_user_id(user_id)
@@ -289,44 +475,6 @@ async def cmd_arm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="Markdown",
     )
     log.info("Strategy armed", user_id=user_id, strategy=strategy_id)
-
-
-async def cmd_disarm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Disarm an active strategy. Usage: /disarm <strategy_id>"""
-    user_id = context.user_data["user_id"]  # type: ignore[index]
-    uid = _parse_user_id(user_id)
-
-    if not context.args:
-        await update.message.reply_text("Usage: /disarm <strategy_id>")
-        return
-
-    strategy_id = context.args[0]
-    bot_mgr = context.bot_data["bot_manager"]
-
-    async with await _get_session(bot_mgr) as session:
-        result = await session.execute(
-            select(UserSubscription).where(
-                UserSubscription.user_id == uid,
-                UserSubscription.catalog_id == strategy_id,
-            )
-        )
-        sub = result.scalar_one_or_none()
-        if not sub:
-            await update.message.reply_text(f"❌ Not subscribed to `{strategy_id}`.")
-            return
-
-        if not sub.is_armed:
-            await update.message.reply_text(f"ℹ️ `{strategy_id}` is already disarmed.")
-            return
-
-        sub.is_armed = False
-        await session.commit()
-
-    await update.message.reply_text(
-        f"🛑 `{strategy_id}` disarmed. No new trades will be placed.",
-        parse_mode="Markdown",
-    )
-    log.info("Strategy disarmed", user_id=user_id, strategy=strategy_id)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
