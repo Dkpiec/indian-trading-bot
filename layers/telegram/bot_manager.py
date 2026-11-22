@@ -357,52 +357,18 @@ class BotManager:
 
                         # Build a PTB Update object manually
                         from telegram import Update as PTBUpdate
-                        from telegram.ext import CallbackContext
                         ptb_update = PTBUpdate.de_json(update, bot=app.bot)
                         print(f"MANUAL_POLL de_json ok type={type(ptb_update).__name__} has_cmd={ptb_update.message is not None}", flush=True)
 
-                        # Dispatch to ALL matching handler groups (PTB processes every group)
-                        any_matched = False
-                        for group_key in sorted(app.handlers.keys()):
-                            handler_group = app.handlers[group_key]
-                            for handler in handler_group:
-                                try:
-                                    check = handler.check_update(ptb_update)
-                                    if check is not None and check is not False:
-                                        print(f"MANUAL_POLL MATCHED handler={type(handler).__name__} group={group_key}", flush=True)
-                                        # Build a proper CallbackContext with all required attributes
-                                        context = CallbackContext(application=app)
-                                        # PTB v21.9: _user_data must be set before .user_data property works
-                                        # The property returns self._user_data which defaults to None
-                                        context._user_data = {}
-                                        context._chat_data = {}
-                                        # Link bot_data to app's shared store so handlers see bot_manager
-                                        context._bot_data = app.bot_data
-                                        # Parse command args from message text
-                                        if ptb_update.message and ptb_update.message.text:
-                                            parts = ptb_update.message.text.strip().split()
-                                            context._args = parts[1:] if len(parts) > 1 else []
-                                        else:
-                                            context._args = []
-                                        try:
-                                            await handler.callback(ptb_update, context)
-                                        except Exception as cb_err:
-                                            print(f"MANUAL_POLL CALLBACK ERROR handler={type(handler).__name__} err={cb_err}", flush=True)
-                                            import traceback
-                                            traceback.print_exc()
-                                            if ptb_update.message:
-                                                try:
-                                                    await ptb_update.message.reply_text(f"❌ Error: {cb_err}")
-                                                except Exception:
-                                                    pass
-                                        any_matched = True
-                                except Exception as e:
-                                    print(f"MANUAL_POLL DISPATCH ERROR handler={type(handler).__name__} group={group_key} err={e}", flush=True)
-                                    import traceback
-                                    traceback.print_exc()
-                                    log.error("Handler dispatch error", error=str(e), handler=type(handler).__name__, group=group_key)
-                        if not any_matched:
-                            print(f"MANUAL_POLL NO MATCH for text={msg_text!r} handler_groups={sorted(app.handlers.keys())}", flush=True)
+                        # Use PTB's own process_update which correctly initializes
+                        # CallbackContext (user_data, chat_data, bot_data, args, etc.)
+                        try:
+                            await app.process_update(ptb_update)
+                            print(f"MANUAL_POLL process_update complete for text={msg_text!r}", flush=True)
+                        except Exception as proc_err:
+                            print(f"MANUAL_POLL PROCESS_ERROR text={msg_text!r} err={proc_err}", flush=True)
+                            import traceback
+                            traceback.print_exc()
 
                 except asyncio.CancelledError:
                     log.info("Manual polling loop cancelled")
