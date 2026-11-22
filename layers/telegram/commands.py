@@ -136,6 +136,27 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
         except Exception as reg_err:
             log.warning("User auto-registration failed (may already exist)", error=str(reg_err))
 
+    # Broker selection does not need DB session — handle before entering session block
+    if action == "broker":
+        broker_key = strategy_id  # e.g. "dhan" or "upstox"
+        if broker_key not in SUPPORTED_BROKERS:
+            await query.edit_message_text(f"❌ Unknown broker: {broker_key}")
+            return
+        # Store selected broker in Redis for this user
+        redis = bot_mgr._redis
+        try:
+            await redis.set(f"trading-bot:user:{uid}:active_broker", broker_key, ex=86400 * 30)
+            broker_name = SUPPORTED_BROKERS[broker_key]["name"]
+            await query.edit_message_text(
+                f"✅ Active broker set to {broker_name}.\n\n"
+                f"All trading commands will now use {broker_name}."
+            )
+            log.info("Broker selected via inline", user_id=user_id, broker=broker_key)
+        except Exception as e:
+            log.error("Failed to store broker selection", error=str(e), user_id=user_id)
+            await query.edit_message_text(f"❌ Failed to save broker: {e}")
+        return
+
     async with await _get_session(bot_mgr) as session:
         if action == "subscribe":
             # Check if already subscribed
