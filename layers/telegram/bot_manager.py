@@ -372,11 +372,12 @@ class BotManager:
                                         print(f"MANUAL_POLL MATCHED handler={type(handler).__name__} group={group_key}", flush=True)
                                         # Build a proper CallbackContext with all required attributes
                                         context = CallbackContext(application=app)
-                                        # Ensure user_data and bot_data dicts exist
-                                        if not hasattr(context, 'user_data') or context.user_data is None:
-                                            context._user_data = {}
-                                        if not hasattr(context, 'bot_data') or context.bot_data is None:
-                                            context._bot_data = dict(app.bot_data)
+                                        # PTB v21.9: _user_data must be set before .user_data property works
+                                        # The property returns self._user_data which defaults to None
+                                        context._user_data = {}
+                                        context._chat_data = {}
+                                        # Link bot_data to app's shared store so handlers see bot_manager
+                                        context._bot_data = app.bot_data
                                         # Parse command args from message text
                                         if ptb_update.message and ptb_update.message.text:
                                             parts = ptb_update.message.text.strip().split()
