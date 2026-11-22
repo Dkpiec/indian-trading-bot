@@ -103,10 +103,26 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
 
     uid = _parse_user_id(user_id)
     if not uid:
-        # Fallback for system user which isn't a UUID
+        # Deterministic UUID for 'system' or any non-UUID user_id
+        # Same Telegram chat_id always produces the same UUID
         import uuid as _uuid
-        uid = _uuid.uuid4()  # generate a deterministic placeholder
-        log.warning("Callback query user_id not a valid UUID, using generated placeholder", chat_id=chat_id, raw_user_id=user_id)
+        uid = _uuid.uuid5(_uuid.NAMESPACE_URL, f"trading-bot:user:{user_id}")
+        log.warning("Callback query user_id not a valid UUID, using deterministic placeholder", chat_id=chat_id, raw_user_id=user_id, uid=str(uid))
+
+        # Auto-register user in users table if not present (satisfies FK constraint)
+        from layers.state.models import User
+        try:
+            async with await _get_session(bot_mgr) as reg_session:
+                existing_user = await reg_session.execute(
+                    select(User).where(User.id == uid)
+                )
+                if not existing_user.scalar_one_or_none():
+                    user_obj = User(id=uid, telegram_chat_id=chat_id, display_name=user_id, is_active=True)
+                    reg_session.add(user_obj)
+                    await reg_session.commit()
+                    log.info("Auto-registered user in users table", uid=str(uid), chat_id=chat_id)
+        except Exception as reg_err:
+            log.warning("User auto-registration failed (may already exist)", error=str(reg_err))
 
     async with await _get_session(bot_mgr) as session:
         if action == "subscribe":
