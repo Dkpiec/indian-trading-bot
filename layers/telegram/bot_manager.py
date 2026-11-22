@@ -33,6 +33,10 @@ MENU_COMMANDS = [
     BotCommand("balance", "Equity / free / used / floor breakdown"),
     BotCommand("trades", "Open positions"),
     BotCommand("profit", "Unrealized P&L summary"),
+    BotCommand("broker", "Select active broker"),
+    BotCommand("credentials", "Enter broker API credentials"),
+    BotCommand("refreshtoken", "Refresh broker access token"),
+    BotCommand("tokenstatus", "Check broker token expiry"),
     BotCommand("forceexit", "Close all open positions immediately"),
     BotCommand("help", "Show this help message"),
 ]

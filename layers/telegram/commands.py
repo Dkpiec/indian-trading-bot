@@ -7,13 +7,17 @@ Broker clients and session_factory are accessed via bot_manager.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 
 import structlog
 from sqlalchemy import select, func
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes,
+    ConversationHandler, MessageHandler, filters as ptb_filters,
+)
 
 from layers.telegram.bot_manager import BotManager
 from layers.state.models import (
@@ -55,13 +59,27 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
         "profit": cmd_profit,
         "forceexit": cmd_forceexit,
         "broker": cmd_broker,
-        "refreshtoken": cmd_refresh_token,
+        "refreshtoken": cmd_refresh_token_async,
+        "tokenstatus": cmd_tokenstatus,
         "help": cmd_help,
     }
     for name, handler in commands.items():
         app.add_handler(CommandHandler(name, _wrap(handler, bot_manager)))
 
-    # Inline keyboard callback handler for strategy selection menus
+    # /credentials conversation handler (multi-step credential entry)
+    cred_conv = ConversationHandler(
+        entry_points=[CommandHandler("credentials", _wrap(_cred_start, bot_manager))],
+        states={
+            CRED_SELECT_BROKER: [CallbackQueryHandler(_cred_broker_selected, pattern=r"^cred_")],
+            CRED_ENTER_FIELD: [MessageHandler(ptb_filters.TEXT & ~ptb_filters.COMMAND, _cred_receive_field)],
+        },
+        fallbacks=[CommandHandler("cancel", _cred_timeout)],
+        conversation_timeout=300,
+    )
+    app.add_handler(cred_conv)
+
+    # Inline keyboard callback handlers
+    app.add_handler(CallbackQueryHandler(_handle_broker_callback, pattern=r"^(refresh:|cred_)"))
     app.add_handler(CallbackQueryHandler(_callback_query_handler))
 
 
@@ -808,7 +826,399 @@ async def cmd_forceexit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 SUPPORTED_BROKERS = {
     "dhan": {"name": "DhanHQ", "env_prefix": "DHAN"},
     "upstox": {"name": "Upstox", "env_prefix": "UPSTOX"},
+    "fyers": {"name": "FYERS", "env_prefix": "FYERS"},
 }
+
+# --- Credential entry conversation states ---
+CRED_SELECT_BROKER, CRED_ENTER_FIELD, CRED_CONFIRM = range(3)
+
+# Fields required per broker for credential storage
+BROKER_CREDENTIAL_FIELDS = {
+    "dhan": [
+        ("client_id", "Dhan Client ID"),
+        ("access_token", "Dhan Access Token"),
+        ("totp_secret", "TOTP Secret (base32, from authenticator app setup)"),
+    ],
+    "fyers": [
+        ("app_id", "FYERS App ID"),
+        ("user_id", "FYERS User ID"),
+        ("password", "FYERS Password"),
+        ("totp_secret", "TOTP Secret (base32)"),
+        ("pin", "MPIN / PIN"),
+    ],
+    "upstox": [
+        ("api_key", "Upstox API Key"),
+        ("api_secret", "Upstox API Secret"),
+        ("redirect_uri", "Redirect URI"),
+    ],
+}
+
+
+def _cred_file_path(broker: str) -> str:
+    """Return the on-disk path for a broker's credential file."""
+    return f"/opt/data/secrets/{broker}.json"
+
+
+async def _save_credentials(broker: str, creds: dict) -> None:
+    """Persist credentials to disk with restrictive permissions."""
+    import json
+    import os
+
+    path = _cred_file_path(broker)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(creds, f, indent=2)
+    os.chmod(path, 0o600)
+    log.info("Broker credentials saved", broker=broker, path=path)
+
+
+async def _load_credentials(broker: str) -> dict | None:
+    """Load credentials from disk, returning None if missing or unreadable."""
+    import json
+
+    path = _cred_file_path(broker)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        log.warning("Failed to load broker credentials", broker=broker, error=str(e))
+        return None
+
+
+def _decode_jwt_exp(token: str) -> float | None:
+    """Decode the 'exp' claim from a JWT without verification. Returns epoch seconds or None."""
+    import base64
+    import json
+
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        # Add padding
+        padding = 4 - len(payload) % 4
+        if padding != 4:
+            payload += "=" * padding
+        decoded = base64.urlsafe_b64decode(payload)
+        data = json.loads(decoded)
+        exp = data.get("exp")
+        return float(exp) if exp is not None else None
+    except Exception:
+        return None
+
+
+# --- Conversation handler steps for /credentials ---
+
+async def _cred_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Step 1: Show broker selection for credential entry."""
+    if not update.message:
+        return ConversationHandler.END
+
+    buttons = []
+    for key, info in SUPPORTED_BROKERS.items():
+        has_creds = await _load_credentials(key) is not None
+        marker = "📝" if has_creds else "➕"
+        buttons.append([InlineKeyboardButton(f"{marker} {info['name']}", callback_data=f"cred_broker:{key}")])
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cred_cancel")])
+
+    await update.message.reply_text(
+        "🔑 Select broker to configure credentials:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return CRED_SELECT_BROKER
+
+
+async def _cred_broker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Callback: broker chosen, start field entry."""
+    query = update.callback_query
+    if not query or not query.data:
+        return ConversationHandler.END
+
+    await query.answer()
+
+    ud = context.user_data
+    if ud is None:
+        return ConversationHandler.END
+
+    if query.data == "cred_cancel":
+        await query.edit_message_text("❌ Credential entry cancelled.")
+        ud.pop("_cred_broker", None)
+        ud.pop("_cred_fields", None)
+        ud.pop("_cred_values", None)
+        return ConversationHandler.END
+
+    if not query.data.startswith("cred_broker:"):
+        return CRED_SELECT_BROKER
+
+    broker = query.data.split(":", 1)[1]
+    fields = BROKER_CREDENTIAL_FIELDS.get(broker)
+    if not fields:
+        await query.edit_message_text(f"❌ Unknown broker: {broker}")
+        return ConversationHandler.END
+
+    ud["_cred_broker"] = broker
+    ud["_cred_fields"] = list(fields)
+    ud["_cred_values"] = {}
+    ud["_cred_field_idx"] = 0
+
+    field_name, field_label = fields[0]
+    await query.edit_message_text(
+        f"🏦 Configuring *{SUPPORTED_BROKERS[broker]['name']}*\n\n"
+        f"Enter `{field_label}`:\n_(Your input will be deleted after reading)_",
+        parse_mode="Markdown",
+    )
+    return CRED_ENTER_FIELD
+
+
+async def _cred_receive_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receive a credential value, delete the message, advance to next field or confirm."""
+    if not update.message or not update.message.text:
+        return CRED_ENTER_FIELD
+
+    ud = context.user_data
+    if ud is None:
+        return ConversationHandler.END
+
+    broker = ud.get("_cred_broker")
+    fields = ud.get("_cred_fields", [])
+    idx = ud.get("_cred_field_idx", 0)
+    values = ud.get("_cred_values", {})
+
+    if not broker or idx >= len(fields):
+        await update.message.reply_text("❌ Session expired. Please run /credentials again.")
+        return ConversationHandler.END
+
+    # Delete user's message for privacy
+    try:
+        await update.message.delete()
+    except Exception:
+        pass  # Bot may not have delete permission
+
+    field_name, field_label = fields[idx]
+    values[field_name] = update.message.text.strip()
+    ud["_cred_values"] = values
+
+    idx += 1
+    ud["_cred_field_idx"] = idx
+
+    if idx < len(fields):
+        next_name, next_label = fields[idx]
+        await update.message.reply_text(
+            f"✅ Saved.\n\nEnter `{next_label}`:\n_(Your input will be deleted after reading)_",
+            parse_mode="Markdown",
+        )
+        return CRED_ENTER_FIELD
+
+    # All fields collected — save
+    try:
+        await _save_credentials(broker, values)
+        await update.message.reply_text(
+            f"✅ Credentials for *{SUPPORTED_BROKERS[broker]['name']}* saved securely.\n\n"
+            f"Use /refreshtoken to refresh the access token.",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to save credentials: {e}")
+
+    # Clean up session state
+    for k in ("_cred_broker", "_cred_fields", "_cred_values", "_cred_field_idx"):
+        ud.pop(k, None)
+
+    return ConversationHandler.END
+
+
+async def _cred_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Conversation timed out."""
+    if update and update.message:
+        await update.message.reply_text("⏰ Credential entry timed out. Run /credentials again.")
+    ud = context.user_data
+    if ud is not None:
+        for k in ("_cred_broker", "_cred_fields", "_cred_values", "_cred_field_idx"):
+            ud.pop(k, None)
+    return ConversationHandler.END
+
+
+async def cmd_tokenstatus(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show token expiry status for all configured brokers using JWT decode."""
+    if not update.message:
+        return
+
+    import time
+
+    lines = ["🔐 *Broker Token Status*\n"]
+    now = time.time()
+
+    for broker_key, info in SUPPORTED_BROKERS.items():
+        creds = await _load_credentials(broker_key)
+        if not creds:
+            lines.append(f"*{info['name']}*: ⚪ No credentials configured")
+            continue
+
+        token = creds.get("access_token") or creds.get("token")
+        if not token:
+            lines.append(f"*{info['name']}*: 🟡 Credentials stored but no access token yet")
+            continue
+
+        exp = _decode_jwt_exp(token)
+        if exp is None:
+            lines.append(f"*{info['name']}*: 🟡 Token present but cannot decode expiry")
+            continue
+
+        remaining = exp - now
+        if remaining <= 0:
+            status = "🔴 EXPIRED"
+            detail = f"{abs(remaining)/3600:.1f}h ago"
+        elif remaining < 3600:
+            status = "🟠 Expiring soon"
+            detail = f"{remaining/60:.0f}m remaining"
+        elif remaining < 7200:
+            status = "🟡"
+            detail = f"{remaining/3600:.1f}h remaining"
+        else:
+            status = "🟢 Valid"
+            detail = f"{remaining/3600:.1f}h remaining"
+
+        exp_dt = datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(f"*{info['name']}*: {status} — {detail}\n  Expires: `{exp_dt}`")
+
+    lines.append("\nUse /refreshtoken to renew an expired or expiring token.")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_refresh_token_async(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Trigger token refresh for a selected broker via background subprocess."""
+    if not update.message:
+        return
+
+    bot_mgr = context.bot_data.get("bot_manager")
+    dhan_ok = bool(getattr(bot_mgr, "_app_state_dhan_client", None))
+
+    from core.config import settings
+    upstox_ok = bool(getattr(settings, "upstox_access_token", None))
+
+    buttons = []
+    for key, info in SUPPORTED_BROKERS.items():
+        has_creds = await _load_credentials(key) is not None
+        active = "✅" if (key == "dhan" and dhan_ok) or (key == "upstox" and upstox_ok) else ""
+        cred_marker = "🔑" if has_creds else "⚠️"
+        label = f"{cred_marker} {info['name']} {active}".strip()
+        buttons.append([InlineKeyboardButton(label, callback_data=f"refresh:{key}")])
+
+    await update.message.reply_text(
+        "🔄 Select broker to refresh token:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def _handle_broker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline keyboard callbacks for broker selection and refresh triggers."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    await query.answer()
+    data = query.data
+
+    # --- Refresh trigger: refresh:{broker} ---
+    if data.startswith("refresh:"):
+        broker = data.split(":", 1)[1]
+        if broker not in SUPPORTED_BROKERS:
+            await query.edit_message_text(f"❌ Unknown broker: {broker}")
+            return
+
+        creds = await _load_credentials(broker)
+        if not creds:
+            await query.edit_message_text(
+                f"❌ No credentials stored for *{SUPPORTED_BROKERS[broker]['name']}*.\n"
+                f"Run /credentials first to save them.",
+                parse_mode="Markdown",
+            )
+            return
+
+        await query.edit_message_text(
+            f"🔄 Refreshing *{SUPPORTED_BROKERS[broker]['name']}* token in background...\n"
+            f"_(FYERS can take up to 5 minutes; Dhan ~30s)_",
+            parse_mode="Markdown",
+        )
+        asyncio.create_task(_run_refresh_in_background(broker, creds, query))
+        return
+
+    # --- Credential broker selection (part of /credentials conversation) ---
+    if data.startswith("cred_broker:") or data == "cred_cancel":
+        # Forward to the conversation handler via user_data context
+        # The CallbackQueryHandler registered in the conversation will pick this up
+        return
+
+
+async def _run_refresh_in_background(
+    broker: str,
+    creds: dict,
+    query,
+) -> None:
+    """Run the refresh script in a background task and notify the chat on completion."""
+    import subprocess
+
+    script_map = {
+        "dhan": ["/opt/data/.venv/bin/python", "/opt/data/scripts/dhan-renew.py", "--force"],
+        "fyers": ["/opt/data/.venv/bin/python", "/opt/data/scripts/fyers_headless_auth.py", "--force"],
+        "upstox": None,  # Upstox uses env-var based tokens, no TOTP refresh script
+    }
+
+    cmd = script_map.get(broker)
+    if cmd is None:
+        await query.edit_message_text(
+            f"⚠️ {SUPPORTED_BROKERS[broker]['name']} does not support TOTP refresh.\n"
+            f"Tokens are managed via environment variables."
+        )
+        return
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd="/opt/data",
+        )
+        # Poll for completion up to 300s
+        for _ in range(60):
+            await asyncio.sleep(5)
+            if proc.poll() is not None:
+                break
+        else:
+            proc.kill()
+            await query.edit_message_text(
+                f"❌ {SUPPORTED_BROKERS[broker]['name']} refresh timed out (5 min) and was killed."
+            )
+            return
+
+        stdout = str(proc.stdout.read()) if proc.stdout is not None else ""
+        stderr = str(proc.stderr.read()) if proc.stderr is not None else ""
+
+        if proc.returncode == 0:
+            combined = stdout + stderr
+            summary_lines = [l for l in combined.split("\n") if l.strip()][-3:]
+            summary = "\n".join(summary_lines) if summary_lines else "Refresh complete."
+            await query.edit_message_text(
+                f"✅ *{SUPPORTED_BROKERS[broker]['name']}* token refreshed successfully.\n\n"
+                f"```\n{summary}\n```\n\n"
+                f"Check /tokenstatus to confirm.",
+                parse_mode="Markdown",
+            )
+        else:
+            err_text = (stderr or stdout).strip()[-500:]
+            await query.edit_message_text(
+                f"❌ *{SUPPORTED_BROKERS[broker]['name']}* refresh failed:\n"
+                f"```\n{err_text}\n```",
+                parse_mode="Markdown",
+            )
+
+    except Exception as e:
+        await query.edit_message_text(
+            f"❌ Refresh error for {SUPPORTED_BROKERS[broker]['name']}: {e}"
+        )
 
 
 async def cmd_broker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -825,7 +1235,8 @@ async def cmd_broker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     buttons = []
     for key, info in SUPPORTED_BROKERS.items():
-        active = "✅" if (key == "dhan" and dhan_ok) or (key == "upstox" and upstox_ok) else "❌"
+        has_creds = await _load_credentials(key) is not None
+        active = "✅" if (key == "dhan" and dhan_ok) or (key == "upstox" and upstox_ok) or (key == "fyers" and has_creds) else "❌"
         label = f"{active} {info['name']}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"broker:{key}")])
 
@@ -886,7 +1297,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/profit — Unrealized P&L\n\n"
         "Broker:\n"
         "/broker — Select active broker\n"
-        "/refreshtoken — Refresh Dhan access token\n\n"
+        "/credentials — Enter/update broker API credentials\n"
+        "/refreshtoken — Refresh broker access token (Dhan/FYERS)\n"
+        "/tokenstatus — Check token expiry for all brokers\n\n"
         "Emergency:\n"
         "/forceexit — Close ALL positions now\n\n"
         "/help — Show this message"
