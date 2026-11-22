@@ -54,6 +54,8 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
         "trades": cmd_trades,
         "profit": cmd_profit,
         "forceexit": cmd_forceexit,
+        "broker": cmd_broker,
+        "refreshtoken": cmd_refresh_token,
         "help": cmd_help,
     }
     for name, handler in commands.items():
@@ -782,23 +784,91 @@ async def cmd_forceexit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     log.warning("Force exit executed", user_id=user_id, closed=closed, total=len(positions))
 
 
+SUPPORTED_BROKERS = {
+    "dhan": {"name": "DhanHQ", "env_prefix": "DHAN"},
+    "upstox": {"name": "Upstox", "env_prefix": "UPSTOX"},
+}
+
+
+async def cmd_broker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show broker selection menu with current status."""
+    if not update.message:
+        return
+
+    bot_mgr = context.bot_data.get("bot_manager")
+    dhan_ok = bool(getattr(bot_mgr, "_app_state_dhan_client", None))
+
+    # Check Upstox availability from env
+    from core.config import settings
+    upstox_ok = bool(getattr(settings, "upstox_access_token", None))
+
+    buttons = []
+    for key, info in SUPPORTED_BROKERS.items():
+        active = "✅" if (key == "dhan" and dhan_ok) or (key == "upstox" and upstox_ok) else "❌"
+        label = f"{active} {info['name']}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"broker:{key}")])
+
+    await update.message.reply_text(
+        "🏦 Select active broker:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def cmd_refresh_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Trigger Dhan token refresh via the renewal script and redeploy."""
+    if not update.message:
+        return
+
+    await update.message.reply_text("🔄 Refreshing Dhan access token...")
+
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["python3", "/opt/data/scripts/dhan-renew.py", "--force"],
+            capture_output=True, text=True, timeout=60, cwd="/opt/data",
+        )
+        output = result.stdout.strip()
+        if result.returncode != 0:
+            err = result.stderr.strip() or output
+            await update.message.reply_text(f"❌ Token refresh failed:\n{err[-500:]}")
+            return
+
+        # Extract key info from output
+        lines = [l for l in output.split("\n") if l.strip()]
+        summary = "\n".join(lines[-3:]) if lines else "Token refreshed."
+        await update.message.reply_text(
+            f"✅ Dhan token refreshed!\n\n{summary}\n\n"
+            "⚠️ Redeploy the service to pick up the new token.\n"
+            "Use Coolify dashboard or ask me to redeploy."
+        )
+        log.info("Dhan token refreshed via /refreshtoken command")
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("❌ Token refresh timed out (60s).")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Token refresh error: {e}")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show help message with all available commands."""
     help_text = (
-        "🤖 *Indian Trading Bot — Commands*\n\n"
-        "*Strategy Management:*\n"
+        "🤖 Indian Trading Bot — Commands\n\n"
+        "Strategy Management:\n"
         "/catalog — Browse available strategies\n"
-        "/subscribe <id> — Subscribe to a strategy\n"
-        "/unsubscribe <id> — Unsubscribe\n"
-        "/arm <id> — Activate for live trading\n"
-        "/disarm <id> — Deactivate\n\n"
-        "*Monitoring:*\n"
+        "/subscribe — Subscribe to a strategy\n"
+        "/unsubscribe — Unsubscribe\n"
+        "/arm — Activate for live trading\n"
+        "/disarm — Deactivate\n\n"
+        "Monitoring:\n"
         "/status — Overview & subscriptions\n"
         "/balance — Equity breakdown (live from Dhan)\n"
         "/trades — Open positions\n"
         "/profit — Unrealized P&L\n\n"
-        "*Emergency:*\n"
+        "Broker:\n"
+        "/broker — Select active broker\n"
+        "/refreshtoken — Refresh Dhan access token\n\n"
+        "Emergency:\n"
         "/forceexit — Close ALL positions now\n\n"
         "/help — Show this message"
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    if update.message:
+        await update.message.reply_text(help_text)
