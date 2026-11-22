@@ -81,14 +81,25 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
     # Inline keyboard callback handlers
     # NOTE: cred_ callbacks are handled INSIDE the ConversationHandler above;
     # do NOT match them here or the conversation handler will never see them.
-    app.add_handler(CallbackQueryHandler(_handle_broker_callback, pattern=r"^refresh:"))
+    # _handle_broker_callback MUST be in a lower group than _callback_query_handler
+    # so refresh: callbacks are processed before the catch-all strategy handler.
+    app.add_handler(CallbackQueryHandler(_handle_broker_callback, pattern=r"^refresh:"), group=-1)
     app.add_handler(CallbackQueryHandler(_callback_query_handler))
 
 
 async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline keyboard button presses for strategy selection."""
+    """Handle inline keyboard button presses for strategy selection.
+
+    NOTE: refresh: and cred_ callbacks are handled by _handle_broker_callback
+    (group=-1) and the /credentials ConversationHandler respectively.
+    This catch-all must skip them to avoid consuming the callback.
+    """
     query = update.callback_query
     if not query or not query.data:
+        return
+
+    # Let dedicated handlers process their own callbacks
+    if query.data.startswith("refresh:") or query.data.startswith("cred_"):
         return
 
     await query.answer()
