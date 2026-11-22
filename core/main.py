@@ -106,11 +106,11 @@ async def lifespan(app: FastAPI):
             count = result.scalar() or 0
             if count == 0:
                 await session.execute(_text("""
-                    INSERT INTO strategy_catalog (id, display_name, strategy_type, underlying, version, is_active, description, created_at, updated_at)
+                    INSERT INTO strategy_catalog (id, display_name, description, plugin_file, underlying, segment, strategy_type, default_params, is_active, version, created_at, updated_at)
                     VALUES
-                    ('nifty-orb-v1', 'Nifty ORB v1', 'orb', 'NIFTY', '1.0', true, 'Opening Range Breakout on Nifty 50', NOW(), NOW()),
-                    ('banknifty-momentum-v1', 'BankNifty Momentum v1', 'momentum', 'BANKNIFTY', '1.0', true, 'Momentum breakout on BankNifty', NOW(), NOW()),
-                    ('nifty-mean-revert-v1', 'Nifty Mean Reversion v1', 'mean_reversion', 'NIFTY', '1.0', true, 'Mean reversion on Nifty 50', NOW(), NOW())
+                    ('nifty-orb-v1', 'Nifty ORB v1', 'Opening Range Breakout on Nifty 50', 'nifty_orb_v1.py', 'NIFTY', 'NSE_FNO', 'orb', '{}', true, '1.0', NOW(), NOW()),
+                    ('banknifty-momentum-v1', 'BankNifty Momentum v1', 'Momentum breakout on BankNifty', 'banknifty_momentum_v1.py', 'BANKNIFTY', 'NSE_FNO', 'momentum', '{}', true, '1.0', NOW(), NOW()),
+                    ('nifty-mean-revert-v1', 'Nifty Mean Reversion v1', 'Mean reversion on Nifty 50', 'nifty_mean_revert_v1.py', 'NIFTY', 'NSE_FNO', 'mean_reversion', '{}', true, '1.0', NOW(), NOW())
                     ON CONFLICT (id) DO NOTHING
                 """))
                 await session.commit()
