@@ -143,11 +143,12 @@ async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     lines = ["📋 *Available Strategies:*", ""]
     for i, s in enumerate(strategies, 1):
-        armed_marker = ""
-        lines.append(f"{i}. `{s.id}` — {s.display_name}")
+        # Escape Markdown special chars in display_name to avoid parse errors
+        safe_name = s.display_name.replace("(", "\\(").replace(")", "\\)").replace("-", "\\-")
+        lines.append(f"{i}. `{s.id}` — {safe_name}")
         lines.append(f"   Type: {s.strategy_type} | Underlying: {s.underlying} | v{s.version}")
     lines.append("")
-    lines.append("Use /subscribe <strategy_id> to subscribe.")
+    lines.append("Use /subscribe <strategy\\_id> to subscribe.")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
