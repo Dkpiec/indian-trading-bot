@@ -361,26 +361,27 @@ class BotManager:
                         ptb_update = PTBUpdate.de_json(update, bot=app.bot)
                         print(f"MANUAL_POLL de_json ok type={type(ptb_update).__name__} has_cmd={ptb_update.message is not None}", flush=True)
 
-                        # Find matching handler in app.handlers
-                        matched = False
-                        for group_idx, (group_key, handler_group) in enumerate(app.handlers.items()):
+                        # Dispatch to ALL matching handler groups (PTB processes every group)
+                        any_matched = False
+                        for group_key in sorted(app.handlers.keys()):
+                            handler_group = app.handlers[group_key]
                             for handler in handler_group:
                                 try:
                                     check = handler.check_update(ptb_update)
                                     if check is not None and check is not False:
                                         print(f"MANUAL_POLL MATCHED handler={type(handler).__name__} group={group_key}", flush=True)
-                                        context = CallbackContext(app, chat_id=ptb_update.effective_chat.id if ptb_update.effective_chat else None, user_id=ptb_update.effective_user.id if ptb_update.effective_user else None)
+                                        context = CallbackContext(
+                                            application=app,
+                                            chat_id=ptb_update.effective_chat.id if ptb_update.effective_chat else None,
+                                            user_id=ptb_update.effective_user.id if ptb_update.effective_user else None,
+                                        )
                                         await handler.callback(ptb_update, context)
-                                        matched = True
-                                        break
+                                        any_matched = True
                                 except Exception as e:
-                                    print(f"MANUAL_POLL DISPATCH ERROR handler={type(handler).__name__} err={e}", flush=True)
-                                    log.error("Handler dispatch error", error=str(e), handler=type(handler).__name__)
-                                    break
-                            if matched:
-                                break
-                        if not matched:
-                            print(f"MANUAL_POLL NO MATCH for text={msg_text!r} handlers_groups={list(app.handlers.keys())}", flush=True)
+                                    print(f"MANUAL_POLL DISPATCH ERROR handler={type(handler).__name__} group={group_key} err={e}", flush=True)
+                                    log.error("Handler dispatch error", error=str(e), handler=type(handler).__name__, group=group_key)
+                        if not any_matched:
+                            print(f"MANUAL_POLL NO MATCH for text={msg_text!r} handler_groups={sorted(app.handlers.keys())}", flush=True)
 
                 except asyncio.CancelledError:
                     log.info("Manual polling loop cancelled")
