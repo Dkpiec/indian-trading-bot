@@ -612,8 +612,7 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not dhan_client:
         if update.message:
             await update.message.reply_text(
-                "💰 *Balance*\n\nDhan broker client not available.\nCheck service logs.",
-                parse_mode="Markdown",
+                "💰 Balance\n\nDhan broker client not available.\nCheck service logs."
             )
         return
 
@@ -625,10 +624,9 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             log.error("Dhan auth token expired/invalid", user_id=user_id)
             if update.message:
                 await update.message.reply_text(
-                    "❌ *Dhan auth failed* (401 Invalid_Authentication)\n\n"
+                    "❌ Dhan auth failed (401 Invalid_Authentication)\n\n"
                     "The DHAN_ACCESS_TOKEN is expired or invalid.\n"
-                    "Update DHAN_ACCESS_TOKEN in /opt/data/secrets/coolify.env and redeploy.",
-                    parse_mode="Markdown",
+                    "Update DHAN_ACCESS_TOKEN in /opt/data/secrets/coolify.env and redeploy."
                 )
         else:
             log.error("Balance fetch failed", error=err_str, user_id=user_id)
@@ -653,16 +651,17 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ts = datetime.fromtimestamp(balance.timestamp, tz=timezone.utc).strftime("%H:%M:%S UTC")
 
     text = (
-        f"💰 *Balance* (as of {ts})\n\n"
-        f"Total Equity: ₹{balance.total_equity:,.2f}\n"
-        f"Free Balance: ₹{balance.free_balance:,.2f}\n"
-        f"Used Margin: ₹{balance.used_margin:,.2f}\n"
-        f"Floor ({floor_pct*100:.0f}%): ₹{floor_amount:,.2f}\n"
+        f"💰 Balance (as of {ts})\n\n"
+        f"Total Equity: Rs.{balance.total_equity:,.2f}\n"
+        f"Free Balance: Rs.{balance.free_balance:,.2f}\n"
+        f"Used Margin: Rs.{balance.used_margin:,.2f}\n"
+        f"Floor ({floor_pct*100:.0f}%): Rs.{floor_amount:,.2f}\n"
     )
     if balance.free_balance < floor_amount:
-        text += "\n⚠️ *Below floor — new entries blocked.*"
+        text += "\n⚠️ Below floor — new entries blocked."
 
-    await update.message.reply_text(text, parse_mode="Markdown")
+    if update.message:
+        await update.message.reply_text(text)
 
 
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
