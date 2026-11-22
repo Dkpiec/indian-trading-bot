@@ -111,13 +111,23 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
 
         # Auto-register user in users table if not present (satisfies FK constraint)
         from layers.state.models import User
+        import hashlib
         try:
             async with await _get_session(bot_mgr) as reg_session:
                 existing_user = await reg_session.execute(
                     select(User).where(User.id == uid)
                 )
                 if not existing_user.scalar_one_or_none():
-                    user_obj = User(id=uid, telegram_chat_id=chat_id, display_name=user_id, is_active=True)
+                    # User model requires email + password_hash (NOT NULL)
+                    placeholder_email = f"system-{chat_id}@trading-bot.local"
+                    placeholder_hash = hashlib.sha256(f"system:{chat_id}".encode()).hexdigest()
+                    user_obj = User(
+                        id=uid,
+                        email=placeholder_email,
+                        password_hash=placeholder_hash,
+                        telegram_chat_id=chat_id,
+                        is_active=True,
+                    )
                     reg_session.add(user_obj)
                     await reg_session.commit()
                     log.info("Auto-registered user in users table", uid=str(uid), chat_id=chat_id)
