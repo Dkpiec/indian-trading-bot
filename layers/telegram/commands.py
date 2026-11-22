@@ -231,22 +231,56 @@ def _wrap(handler, bot_manager: BotManager):
         # Fallback: if chat_id matches the configured system chat, accept as system user
         if not user_id:
             from core.config import settings
-            configured_chat = str(settings.telegram_chat_id).strip('"').strip("'")
-            if chat_id == configured_chat:
-                user_id = "system"
-                log.info("Chat accepted via configured TELEGRAM_CHAT_ID fallback", chat_id=chat_id)
-            else:
-                log.warning(
-                    "Unauthorized Telegram command — no mapping found",
-                    chat_id=chat_id,
-                    configured_chat=configured_chat,
-                    redis_keys_checked=True,
+            try:
+                configured_chat = int(str(settings.telegram_chat_id).strip('"').strip("'"))
+                if int(chat_id) == configured_chat:
+                    user_id = "system"
+                    log.info("Chat accepted via configured TELEGRAM_CHAT_ID fallback", chat_id=chat_id)
+            except (ValueError, TypeError):
+                pass
+
+        if not user_id:
+            log.warning(
+                "Unauthorized Telegram command — no mapping found",
+                chat_id=chat_id,
+            )
+            if update.message:
+                await update.message.reply_text(
+                    "⚠️ Unauthorized. Chat ID not recognized."
                 )
-                if update.message:
-                    await update.message.reply_text(
-                        "⚠️ Unauthorized. Chat ID not recognized."
+            return
+
+        # Use deterministic UUID matching callback handler's uuid5 logic
+        # so /arm, /disarm, /unsubscribe find subscriptions created via inline buttons
+        uid = _parse_user_id(user_id)
+        if not uid:
+            import uuid as _uuid
+            uid = _uuid.uuid5(_uuid.NAMESPACE_URL, f"trading-bot:user:{user_id}")
+            # Auto-register user in users table if not present (satisfies FK constraint)
+            from layers.state.models import User
+            import hashlib
+            try:
+                async with await _get_session(bot_manager) as reg_session:
+                    existing_user = await reg_session.execute(
+                        select(User).where(User.id == uid)
                     )
-                return
+                    if not existing_user.scalar_one_or_none():
+                        placeholder_email = f"system-{chat_id}@trading-bot.local"
+                        placeholder_hash = hashlib.sha256(f"system:{chat_id}".encode()).hexdigest()
+                        user_obj = User(
+                            id=uid,
+                            email=placeholder_email,
+                            password_hash=placeholder_hash,
+                            telegram_chat_id=chat_id,
+                            is_active=True,
+                        )
+                        reg_session.add(user_obj)
+                        await reg_session.commit()
+                        log.info("Auto-registered user via _wrap", uid=str(uid), chat_id=chat_id)
+            except Exception as reg_err:
+                log.warning("User auto-registration in _wrap failed", error=str(reg_err))
+            # Store the UUID string so handlers can use it consistently
+            user_id = str(uid)
 
         # Inject user_id into context for the handler
         context.user_data["user_id"] = user_id  # type: ignore[index]
