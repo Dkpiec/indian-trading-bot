@@ -18,12 +18,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Install Upstox V3 WS client from local wheelhouse (protobuf + six + websocket-client)
-COPY wheelhouse/upstox_client/ /tmp/upstox_client/
+# Install wheels from local wheelhouse (skip upstox_client if not present)
 COPY wheelhouse/ /tmp/wheelhouse/
-RUN pip install /tmp/wheelhouse/*.whl 2>/dev/null || true && \
-    pip install /tmp/upstox_client/ && \
-    rm -rf /tmp/upstox_client /tmp/wheelhouse
+RUN pip install --no-deps /tmp/wheelhouse/*.whl 2>/dev/null || true && \
+    if [ -d /tmp/wheelhouse/upstox_client ] && [ -f /tmp/wheelhouse/upstox_client/setup.py ] || [ -f /tmp/wheelhouse/upstox_client/pyproject.toml ]; then \
+        pip install /tmp/wheelhouse/upstox_client/; \
+    else \
+        echo "WARN: upstox_client not found or not installable, skipping"; \
+    fi && \
+    rm -rf /tmp/wheelhouse
 
 # Copy application code
 COPY . .
