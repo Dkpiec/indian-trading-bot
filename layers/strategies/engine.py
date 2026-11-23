@@ -809,15 +809,15 @@ class ExecutionEngine:
 
     async def _fetch_index_ltp(self, underlying: str) -> Optional[float]:
         """Fetch the index LTP for an underlying: Dhan poll first, free
-        Yahoo fallback for NIFTY (Yahoo has no SENSEX ticker)."""
+        Yahoo fallback for NIFTY/SENSEX/BANKNIFTY."""
         u = underlying.upper()
         try:
             if self._dhan:
                 spot = await self._dhan.get_index_ltp(u)
                 if spot:
                     return spot
-            # Yahoo fallback (only NIFTY/BANKNIFTY have free Yahoo tickers).
-            if u in ("NIFTY", "BANKNIFTY") and self._dhan:
+            # Yahoo fallback (NIFTY=^NSEI, SENSEX=^BSESN, BANKNIFTY=^NSEI).
+            if u in ("NIFTY", "SENSEX", "BANKNIFTY") and self._dhan:
                 spot = await self._dhan._yahoo_index_ltp(u)
                 if spot:
                     return spot

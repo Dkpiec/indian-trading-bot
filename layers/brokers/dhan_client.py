@@ -96,7 +96,7 @@ class DhanClient(BrokerBase):
     # Yahoo has NIFTY (and BANKNIFTY) index tickers but NO free SENSEX one.
     # SENSEX falls back to the Dhan poll only; the Dhan index LTP is the
     # primary source for SENSEX.
-    YAHOO_INDEX = {"NIFTY": "%5ENSEI"}
+    YAHOO_INDEX = {"NIFTY": "%5ENSEI", "SENSEX": "%5EBSESN", "BANKNIFTY": "%5ENSEI"}
 
     # Per-symbol failure state so we stop hammering a dead Dhan endpoint.
     _index_poll_disabled: Dict[str, float] = {}  # symbol → ts of last Dhan failure

@@ -195,10 +195,18 @@ async def lifespan(app: FastAPI):
                         ('NIFTY101', 'NIFTY ORB v6e', 'NIFTY ORB v6e CE+PE legs', 'dhan_v6e_nifty.py', 'NIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '6e', NOW(), NOW()),
                         ('NIFTY102', 'NIFTY SL-Hunt v4.1b', 'NIFTY SL-Hunt v4.1b CE leg', 'nifty_slhunt_reversal.py', 'NIFTY', 'NSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1b', NOW(), NOW()),
                         ('BANKNIFTY101', 'BankNifty ORB v2', 'BankNifty ORB Invalidation v2 CE+PE monthly', 'orb_banknifty_fyers.py', 'BANKNIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '2', NOW(), NOW()),
-                        ('SENSEX101', 'SENSEX ORB Invalidation', 'SENSEX ORB Invalidation CE+PE legs', 'orb_sensex_dhan.py', 'SENSEX', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '5', NOW(), NOW()),
-                        ('SENSEX102', 'SENSEX SL-Hunt V4.1g', 'SENSEX SL-Hunt V4.1g CE legs', 'sensex_slhunt_ce.py', 'SENSEX', 'NSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1g', NOW(), NOW())
+                        ('SENSEX101', 'SENSEX ORB Invalidation', 'SENSEX ORB Invalidation CE+PE legs', 'orb_sensex_dhan.py', 'SENSEX', 'BSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '5', NOW(), NOW()),
+                        ('SENSEX102', 'SENSEX SL-Hunt V4.1g', 'SENSEX SL-Hunt V4.1g CE legs', 'sensex_slhunt_ce.py', 'SENSEX', 'BSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1g', NOW(), NOW())
                         ON CONFLICT (id) DO NOTHING
                     """))
+                    # Fix the SENSEX segment in-place: the original seed used
+                    # NSE_FNO, but SENSEX options live on BSE_FNO (Dhan) /
+                    # BSE_FO (Upstox). The ON CONFLICT DO NOTHING above only
+                    # inserts missing rows; this UPDATE fixes existing ones.
+                    await session.execute(text(
+                        "UPDATE strategy_catalog SET segment = 'BSE_FNO' "
+                        "WHERE underlying = 'SENSEX' AND segment = 'NSE_FNO'"
+                    ))
                     await session.commit()
                     log.info("Seeded 5 merged strategies (CE+PE legs) from Hermes multi-broker engine")
                 else:
