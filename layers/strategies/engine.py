@@ -287,8 +287,9 @@ class ExecutionEngine:
         # Get LTP
         symbol = self._get_symbol(cat)
         security_id = self._get_security_id(cat)
+        underlying = (cat.underlying or "NIFTY").upper()
         instrument_key = self._get_instrument_key(cat)
-        ltp = await self._feed.get_ltp(instrument_key, security_id=security_id, symbol=symbol)
+        ltp = await self._feed.get_ltp(instrument_key, security_id=security_id, symbol=underlying)
         if ltp is None:
             return
 

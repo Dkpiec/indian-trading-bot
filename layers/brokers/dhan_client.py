@@ -96,11 +96,13 @@ class DhanClient(BrokerBase):
         Accepts a Dhan index code (NIFTY, SENSEX, BANKNIFTY) or an
         underlying name; maps to the Dhan index security IDs.
         """
-        index_ids = {"NIFTY": "midev834430579", "SENSEX": "midew834426258"}
+        # Dhan index security IDs (public constants from the Dhan v2 API docs)
+        index_ids = {"NIFTY": "mid3101", "SENSEX": "mid3040"}
         code = symbol.upper()
-        # Strip trailing option-contract suffixes like NIFTY_25DEC25_CE
-        for suffix in ("_CE", "_PE"):
+        # Strip trailing option-contract suffixes: NIFTY_6e_CE, NIFTY_25DEC25_CE_PE, ...
+        for suffix in ("_CE_PE", "_PE", "_CE"):
             code = code.replace(suffix, "")
+        code = code.replace("_", "")
         for known in index_ids:
             if code.startswith(known):
                 code = known
