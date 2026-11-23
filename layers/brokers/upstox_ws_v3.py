@@ -396,6 +396,9 @@ class UpstoxWSV3:
 
             The code in the query string is single-use, so this must be
             called fresh on every connect(). Returns None on failure.
+
+            Cloudflare blocks the default Python urllib User-Agent (1010),
+            so we send a browser-like UA to get through.
             """
             import urllib.request
             import urllib.error
@@ -405,6 +408,8 @@ class UpstoxWSV3:
                 headers={
                     "Authorization": auth,
                     "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 },
                 method="GET",
             )
@@ -436,8 +441,6 @@ class UpstoxWSV3:
         def _connect_patched(self):
             feeder = self.feeder
             if feeder is None:
-                # First call (feeder not yet created by our pre-init) —
-                # build it here with the streamer's real callback methods.
                 from upstox_client.feeder.market_data_feeder_v3 import MarketDataFeederV3
                 feeder = MarketDataFeederV3(
                     api_client=self.api_client,
@@ -457,18 +460,24 @@ class UpstoxWSV3:
                 return
             headers = {"Authorization": auth, "Accept": "*/*"}
             sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
-            # Per the Upstox V3 docs: "Ensure that your WebSocket client is
-            # configured to handle automatic redirection to the authorized
-            # endpoint after authentication." websocket-client follows 3xx
-            # redirects in the SAME TLS session (redirect_limit default=3),
-            # which is exactly what the docs require. The ?r= token in the
-            # 302 Location header is bound to the TLS session that generated
-            # it, so a separate raw-socket handshake (our old _resolve) broke
-            # that binding and got 403 on the wsfeeder-api target.
-            ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
-            log.info("Upstox v3 WS connecting (native redirect follow)", target=ws_url)
+            # Primary: /authorize endpoint (browser UA to bypass Cloudflare
+            # 1010). Returns the wss:// URL directly — no 302 redirect race,
+            # no TLS session break, no Cloudflare block.
+            target = _resolve_via_authorize(auth)
+            if target:
+                log.info("Upstox v3 WS connecting via /authorize URL",
+                         target=target[:80])
+            else:
+                # Fallback: native websocket-client redirect follow.
+                # Per Upstox docs: "configure your WebSocket client to handle
+                # automatic redirection to the authorized endpoint."
+                # websocket-client follows 301/302/303 in-session, but the
+                # cross-host ?r= token may 403 if the session breaks.
+                target = "wss://api.upstox.com/v3/feed/market-data-feed"
+                log.info("Upstox v3 WS connecting (native redirect follow)",
+                         target=target)
             feeder.ws = _ws.WebSocketApp(
-                ws_url,
+                target,
                 header=headers,
                 on_open=feeder.on_open,
                 on_message=feeder.on_message,
