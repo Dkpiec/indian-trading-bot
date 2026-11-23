@@ -358,6 +358,7 @@ class BotManager:
                 log.warning("Network diagnostic to api.telegram.org failed", error=str(diag_err))
 
             poll_count = 0
+            consecutive_409 = 0
             # Force-reset: use offset=-1 on first poll to grab any pending update
             initial_offset = -1
             while self._apps.get(token) is app:
@@ -371,7 +372,19 @@ class BotManager:
                         params={"offset": current_offset, "timeout": 1},
                     )
                     if poll_count <= 5:
-                                        print(f"MANUAL_POLL HTTP {resp.status_code} headers={dict(resp.headers)} body={resp.text[:300]}", flush=True)
+                        print(f"MANUAL_POLL HTTP {resp.status_code} headers={dict(resp.headers)} body={resp.text[:300]}", flush=True)
+
+                    # Handle 409 Conflict: another poller is using this token
+                    if resp.status_code == 409:
+                        consecutive_409 += 1
+                        backoff = min(consecutive_409 * 3, 30)  # 3s, 6s, 9s, ... up to 30s
+                        if poll_count <= 10:
+                            print(f"MANUAL_POLL 409 (conflict) — backing off {backoff}s (consecutive={consecutive_409})", flush=True)
+                        await asyncio.sleep(backoff)
+                        continue
+
+                    # Reset consecutive 409 counter on success
+                    consecutive_409 = 0
                     data = resp.json()
                     updates = data.get("result", [])
                     if updates:
