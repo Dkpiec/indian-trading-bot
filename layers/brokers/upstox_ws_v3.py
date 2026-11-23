@@ -331,10 +331,16 @@ class UpstoxWSV3:
         import websocket as _ws
 
         # Cache the resolved feed URL per-streamer so reconnects reuse it.
+        # (Now always overwritten on each connect() — see _connect_patched.)
         resolved_url: dict[str, str] = {}
 
-        def _resolve(url: str, headers: Dict[str, str]) -> str:
-            """Handshake to `url`; if the server 3xx-redirects, follow once."""
+        def _resolve(url: str, headers: Dict[str, str], force: bool = False) -> str:
+            """Handshake to `url`; if the server 3xx-redirects, follow once.
+
+            `force` is accepted but always performs a fresh handshake —
+            the redirect target carries a session token that goes stale,
+            so we never reuse a cached URL across reconnects.
+            """
             m = re.match(r"ws(s?)://([^/]+)(/.*)", url)
             if not m:
                 return url
@@ -402,10 +408,13 @@ class UpstoxWSV3:
             ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
             auth = self.api_client.configuration.auth_settings().get("OAUTH2", {}).get("value", "")
             headers = {"Authorization": auth, "Accept": "*/*"}
-            target = resolved_url.get("url")
-            if not target:
-                target = _resolve(ws_url, headers)
-                resolved_url["url"] = target
+            # Always re-resolve the redirect target on every connect().
+            # The 302 target from api.upstox.com carries a session-qualified
+            # URL on wsfeeder-api.upstox.com that can go stale (401/403).
+            # Re-resolving is one cheap HTTP request and guarantees a fresh
+            # session token, so reconnects never hit a stale URL.
+            target = _resolve(ws_url, headers, force=True)
+            resolved_url["url"] = target
             if feeder.ws and feeder.ws.sock:
                 return
             sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
