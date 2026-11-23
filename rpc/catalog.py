@@ -25,7 +25,14 @@ async def list_catalog():
     from layers.state.models import StrategyCatalog
 
     if not _db_available or not async_session_factory:
-        return {"strategies": [], "status": "degraded", "message": "Database unavailable"}
+        # Use in-memory fallback catalog
+        from layers.state.fallback_db import get_catalog
+        strategies = await get_catalog()
+        return {
+            "strategies": strategies,
+            "status": "degraded",
+            "message": "Database unavailable — using in-memory fallback catalog",
+        }
 
     try:
         async with async_session_factory() as session:
@@ -62,7 +69,13 @@ async def subscribe(req: SubscribeRequest):
     import hashlib
 
     if not _db_available or not async_session_factory:
-        raise HTTPException(status_code=503, detail="Database unavailable")
+        # Use in-memory fallback
+        from layers.state.fallback_db import get_catalog_entry, subscribe as fallback_subscribe
+        entry = await get_catalog_entry(req.catalog_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Strategy {req.catalog_id} not found or inactive")
+        sub_id = await fallback_subscribe(req.catalog_id, "system", req.custom_params)
+        return {"status": "subscribed", "catalog_id": req.catalog_id, "subscription_id": sub_id, "fallback": True}
 
     # Verify catalog entry exists
     async with async_session_factory() as session:
