@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 import re
 import time
@@ -148,24 +149,104 @@ class MarketDataFeed:
 # ---------------------------------------------------------------------------
 
 
+# Upstox instruments JSON (cached). Keys are always "SEGMENT|numeric_id"
+# (e.g. NSE_FO|49492, NSE_INDEX|399001) — see the Upstox V3 docs: the REST
+# /v3/market-quote/quotes endpoint and the WS v3 feed both use this exact
+# format. A formatted string like "NSE_FNO|25000_25DEC26_CE_NIFTY" is NOT a
+# valid Upstox key and the WS server silently drops such subscriptions.
+_UPSTOX_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
+_instruments_index: Dict[tuple, str] = {}
+_instruments_loaded_at: float = 0.0
+
+
+def _load_upstox_instruments(force: bool = False) -> bool:
+    """Fetch + index the Upstox complete instruments JSON (gzip, ~60MB).
+
+    The index maps (segment, expiry, strike, option_type) -> instrument_key
+    (the full "SEGMENT|exchange_token" string, e.g. "NSE_FO|12345").
+    Cached for 1 hour — the file refreshes daily at ~6 AM IST.
+    """
+    global _instruments_index, _instruments_loaded_at
+    import time as _time
+    now = _time.time()
+    if not force and _instruments_index and (now - _instruments_loaded_at) < 3600:
+        return True
+    try:
+        import urllib.request, gzip
+        req = urllib.request.Request(
+            _UPSTOX_INSTRUMENTS_URL,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "*/*",
+                "Referer": "https://upstox.com/",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(gzip.decompress(resp.read()).decode())
+        _instruments_loaded_at = now
+        _instruments_index.clear()
+        from datetime import datetime as _dt, timezone as _tz
+        for entry in data:
+            seg = entry.get("segment", "")
+            if seg not in ("NSE_FO", "BSE_FO"):
+                continue
+            instrument_key = entry.get("instrument_key", "")  # e.g. NSE_FO|12345
+            # expiry is epoch MILLISECONDS in the JSON — convert to ISO date (UTC).
+            expiry_ms = entry.get("expiry", 0)
+            if not expiry_ms:
+                continue
+            expiry_iso = _dt.fromtimestamp(expiry_ms / 1000, tz=_tz.utc).strftime("%Y-%m-%d")
+            strike = entry.get("strike_price", 0.0)
+            opt_type = str(entry.get("instrument_type", "")).upper()  # CE / PE / FUT
+            underlying = str(entry.get("asset_symbol", "")).upper()
+            if not instrument_key or opt_type not in ("CE", "PE"):
+                continue
+            _instruments_index[(seg, expiry_iso, float(strike or 0), opt_type)] = instrument_key
+        log.info("Upstox instruments indexed", count=len(_instruments_index))
+        return True
+    except Exception as e:
+        log.warning("Upstox instruments fetch failed — using stale index", error=str(e))
+        return len(_instruments_index) > 0
+
+
 def resolve_instrument_key(
     underlying: str,
     strike: float,
     expiry: str,
     option_type: str,
-    segment: str = "NSE_FNO",
+    segment: str = "NSE_FO",
 ) -> str:
-    """Build an Upstox instrument_key string.
+    """Resolve a real Upstox instrument key: SEGMENT|numeric_id.
 
-    Format: NSE_FNO|{strike}_{expiry}_{CE/PE}_{underlying}
-    Example: NSE_FNO|24000_25DEC26_CE_NIFTY
+    Looks up the instrument in the Upstox instruments JSON (cached 5 min).
+    The Upstox WS V3 feed and the REST /v3/market-quote/quotes endpoint both
+    use the "SEGMENT|numeric_id" format (e.g. NSE_FO|49492). SENSEX options
+    live on BSE_FO.
 
-    Upstox uses a specific format; this is a best-effort resolver.
-    For production, use the Upstox instruments JSON file.
+    Falls back to a clearly-marked readable label when the instrument is not
+    in the JSON — that label is valid for Dhan-facing code but NOT for an
+    Upstox WS subscription (the server will drop it).
     """
-    expiry_tag = _format_expiry(expiry)
-    key = f"{segment}|{int(strike)}_{expiry_tag}_{option_type.upper()}_{underlying}"
-    return key
+    if not _load_upstox_instruments():
+        return f"{segment}|{int(strike)}_{underlying}_{option_type.upper()}"  # label fallback
+    opt_type = option_type.upper()
+    from datetime import datetime as _dt, timezone as _tz
+    # Normalize expiry to ISO date (params may pass ISO or epoch ms).
+    exp_raw = expiry
+    if isinstance(exp_raw, (int, float)) and exp_raw > 1e12:
+        expiry_iso = _dt.fromtimestamp(exp_raw / 1000, tz=_tz.utc).strftime("%Y-%m-%d")
+    elif isinstance(exp_raw, str) and exp_raw.isdigit() and len(exp_raw) > 10:
+        expiry_iso = _dt.fromtimestamp(int(exp_raw) / 1000, tz=_tz.utc).strftime("%Y-%m-%d")
+    else:
+        expiry_iso = str(exp_raw)  # already ISO or short date
+    resolved = _instruments_index.get((segment, expiry_iso, float(strike), opt_type))
+    if resolved:
+        return resolved
+    log.warning(
+        "Upstox instrument not in JSON — WS subscription will be dropped",
+        segment=segment, expiry=expiry_iso, strike=strike, opt_type=opt_type,
+    )
+    return f"{segment}|{int(strike)}_{underlying}_{opt_type}"
 
 
 def _format_expiry(date_str: str) -> str:
@@ -756,7 +837,9 @@ class ExecutionEngine:
         underlying = cat.underlying or "NIFTY"
         segment = cat.segment
         if not segment:
-            segment = "BSE_FNO" if underlying.upper().startswith("SENSEX") else "NSE_FNO"
+            segment = "BSE_FO" if underlying.upper().startswith("SENSEX") else "NSE_FO"
+        # Upstox segments use _FO (Dhan uses _FNO) — normalize for the key.
+        segment = segment.replace("_FNO", "_FO")
         params = cat.default_params or {}
         strike = params.get("strike", 0)
         expiry = params.get("expiry", "")

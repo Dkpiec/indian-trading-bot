@@ -38,6 +38,8 @@ class UpstoxWSV3:
         self._streamer = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running = False
+        self._first_tick_logged = False
+        self._ws_open = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -76,14 +78,32 @@ class UpstoxWSV3:
         self._streamer.on("error", lambda err: self._on_error(err))
         self._streamer.on("close", lambda code, reason: self._on_close(code, reason))
 
-        # connect() spawns a daemon thread internally
+        # connect() spawns a daemon WS thread internally and returns
+        # immediately; the socket is NOT open yet. Subscribe (in
+        # handle_open) can raise "WebSocket is not open." if on_open fires
+        # before the socket is ready. Poll for the open state, then verify
+        # the initial subscription actually went out.
         self._streamer.connect()
         self._running = True
         log.info(
-            "Upstox v3 WS starting",
+            "Upstox v3 WS connecting",
             instruments=len(instrument_keys),
             mode=mode,
         )
+        # Wait up to 10s for the socket to open (feeder.ws.sock set on open).
+        feeder = self._streamer.feeder
+        for _ in range(20):
+            if feeder and feeder.ws and feeder.ws.sock:
+                log.info("Upstox v3 WS socket open")
+                break
+            await asyncio.sleep(0.5)
+        else:
+            log.error("Upstox v3 WS did not open within 10s — retrying once")
+            try:
+                self._streamer.connect()
+                await asyncio.sleep(3)
+            except Exception as e:
+                log.error("Upstox v3 WS reconnect failed", error=str(e))
 
     async def stop(self) -> None:
         """Disconnect gracefully."""
@@ -129,13 +149,12 @@ class UpstoxWSV3:
     # ------------------------------------------------------------------
 
     def _on_open(self) -> None:
+        self._ws_open = True
         log.info("Upstox v3 WS connected")
         if self._loop:
             self._loop.call_soon_threadsafe(
                 lambda: self._queue.put_nowait({"type": "ws_open"})
             )
-
-    _first_tick_logged = False
 
     def _on_message(self, message: Any) -> None:
         """Bridge SDK ticks into the async queue.
@@ -154,30 +173,46 @@ class UpstoxWSV3:
         if not self._loop or not self._running:
             return
         try:
-            feeds = message.get("feeds") if isinstance(message, dict) else None
-            if feeds:
-                for key, feed in feeds.items():
-                    ltpc = feed.get("ltpc") or {}
-                    ltp = ltpc.get("ltp")
-                    if ltp is None:
-                        continue
-                    tick = {
-                        "type": "tick",
-                        "instrument_key": key,
-                        "last_price": float(ltp),
-                        "change_percent": float(ltpc.get("cp", 0) or 0),
-                        "ts": time.time(),
-                    }
-                    if not self._first_tick_logged:
-                        self._first_tick_logged = True
-                        log.info("First Upstox WS tick received", instrument_key=key, ltp=tick["last_price"])
-                    self._loop.call_soon_threadsafe(
-                        lambda t=tick: self._queue.put_nowait(t)
-                    )
+            if not isinstance(message, dict):
+                log.warning("Upstox WS non-dict message", type=type(message).__name__)
+                return
+            feeds = message.get("feeds")
+            # MessageToDict emits the repeated FeedsEntry field as a LIST of
+            # {"key": instrument_key, "value": feed} (a map would be a dict).
+            if isinstance(feeds, dict):
+                entries = list(feeds.items())
+            elif isinstance(feeds, list):
+                entries = [(e.get("key"), e.get("value")) for e in feeds if isinstance(e, dict)]
             else:
-                # Unknown / malformed message shape — log at warning so it's
-                # visible in the container logs.
-                log.warning("Upstox WS unrecognised message shape", keys=list(message.keys()) if isinstance(message, dict) else type(message).__name__)
+                # market_info / status frames carry no feeds — skip silently.
+                return
+            for key, feed in entries:
+                if not key or not isinstance(feed, dict):
+                    continue
+                # Feed oneof: ltpc / fullFeed / firstLevelWithGreeks. In
+                # ltpc mode the oneof resolves to the nested ltpc message;
+                # in full/option modes fall back to the flat top-level fields
+                # (MarketFullFeed/IndexFullFeed have ltp at the top level too).
+                ltpc = feed.get("ltpc")
+                if not isinstance(ltpc, dict):
+                    ltpc = feed  # flat shape (full mode)
+                ltp = ltpc.get("ltp")
+                if ltp is None:
+                    continue
+                tick = {
+                    "type": "tick",
+                    "instrument_key": key,
+                    "last_price": float(ltp),
+                    "change_percent": float(ltpc.get("cp", 0) or 0),
+                    "ts": time.time(),
+                }
+                if not self._first_tick_logged:
+                    self._first_tick_logged = True
+                    log.info("First Upstox WS tick received",
+                             instrument_key=key, ltp=tick["last_price"])
+                self._loop.call_soon_threadsafe(
+                    lambda t=tick: self._queue.put_nowait(t)
+                )
         except asyncio.QueueFull:
             pass
         except Exception as e:
@@ -193,6 +228,7 @@ class UpstoxWSV3:
     def _on_close(self, code: Any, reason: Any) -> None:
         log.warning("Upstox v3 WS closed", code=code, reason=str(reason))
         self._running = False
+        self._ws_open = False
         if self._loop:
             self._loop.call_soon_threadsafe(
                 lambda: self._queue.put_nowait({"type": "ws_close", "code": code})
