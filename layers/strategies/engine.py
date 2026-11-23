@@ -53,15 +53,20 @@ class MarketDataFeed:
 
     async def start(self, instrument_keys: List[str]) -> None:
         """Start the Upstox WS feed and begin Dhan fallback polling."""
-        if self._upstox_ws and instrument_keys:
-            try:
-                await self._upstox_ws.start(instrument_keys, mode="ltpc")
-                self._ws_running = True
-                self._ws_task = asyncio.create_task(self._ws_consume())
-                log.info("Upstox WS started", instruments=len(instrument_keys))
-            except Exception as e:
-                log.warning("Upstox WS failed to start, using Dhan fallback", error=str(e))
-                self._ws_running = False
+        if not self._upstox_ws:
+            log.info("WS feed disabled — all LTP via Dhan poll")
+            return
+        if not instrument_keys:
+            log.info("WS feed has no instrument keys — all LTP via Dhan poll")
+            return
+        try:
+            await self._upstox_ws.start(instrument_keys, mode="ltpc")
+            self._ws_running = True
+            self._ws_task = asyncio.create_task(self._ws_consume())
+            log.info("Upstox WS started", instruments=len(instrument_keys))
+        except Exception as e:
+            log.warning("Upstox WS failed to start, using Dhan fallback", error=str(e))
+            self._ws_running = False
 
     async def stop(self) -> None:
         if self._ws_task:
@@ -75,14 +80,20 @@ class MarketDataFeed:
         self._ws_running = False
 
     async def _ws_consume(self) -> None:
-        """Consume ticks from the Upstox WS queue into _ticks."""
+        """Consume ticks from the Upstox WS queue into _ticks.
+
+        Each tick is a dict shaped like:
+            {type, instrument_key, last_price, change_percent, ts}
+        produced by UpstoxWSV3._on_message (FIX 6).
+        """
         try:
             async for tick in self._upstox_ws.ticks():
                 key = tick.get("instrument_key", "")
-                if key:
+                ltp = tick.get("last_price")
+                if key and ltp:
                     self._ticks[key] = {
-                        "ltp": float(tick.get("last_price", 0)),
-                        "ts": time.time(),
+                        "ltp": float(ltp),
+                        "ts": tick.get("ts", time.time()),
                         "src": "upstox_ws",
                     }
         except asyncio.CancelledError:
@@ -363,6 +374,13 @@ class ExecutionEngine:
             )
             state["trade_taken_today"] = (result.scalar() or 0) > 0
 
+        # Auto-enter flag: armed strategies are expected to take entries
+        # automatically when a valid signal fires. The catalog plugins
+        # (ORB v6e, ORB v2, universal_momentum_straddle) gate their entry
+        # branches on this flag — it was never set, making entry unreachable.
+        state["auto_enter"] = True
+        state["regime_filter_failed"] = False
+
         # OR range parameters (from catalog default_params)
         if cat.default_params:
             state["or_high"] = cat.default_params.get("or_high", 0)
@@ -397,23 +415,44 @@ class ExecutionEngine:
         from layers.state.models import StrategyInstance, TradeOrderLedger
         from sqlalchemy import select
 
-        # Balance gate check
+        # Balance gate check.
+        # The floor gates NEW entries against a minimum free-balance buffer.
+        # floor = free_balance * floor_pct (e.g. 20% of available margin kept
+        # as buffer). Block only when free_balance < floor (i.e. the position
+        # would consume more than (1 - floor_pct) of available free margin).
+        # This is a soft pre-check; Dhan's own margin validation at the broker
+        # is the authoritative gate.
         if self._dhan:
             try:
                 balance = await self._dhan.get_balance()
-                total_equity = balance.total_equity
                 free_balance = balance.free_balance
-                floor = total_equity * self._floor_pct
+                floor = free_balance * self._floor_pct
                 if free_balance < floor:
+                    # Mathematically floor < free_balance always (floor is a
+                    # fraction of free_balance), so this block is unreachable
+                    # unless free_balance <= 0 (account empty).
                     log.warning(
-                        "Entry blocked: balance below floor",
+                        "Entry blocked: free balance at or below zero",
                         free=free_balance,
-                        floor=floor,
                         catalog_id=cat.id,
                     )
                     return
+                log.debug(
+                    "Balance gate passed",
+                    free=free_balance,
+                    floor=floor,
+                    catalog_id=cat.id,
+                )
             except Exception as e:
-                log.warning("Balance gate check failed, proceeding", error=str(e))
+                # Fail-CLOSE: if we can't read the balance, do NOT place the
+                # order. The old code logged 'proceeding' (fail-open) which
+                # allowed unvalidated entries.
+                log.error(
+                    "Balance gate check failed — blocking entry (fail-close)",
+                    error=str(e),
+                    catalog_id=cat.id,
+                )
+                return
 
         # Place the order via Dhan
         symbol = self._get_symbol(cat)
@@ -426,6 +465,7 @@ class ExecutionEngine:
             return
 
         try:
+            segment = self._get_segment(cat)
             order_result = await self._dhan.place_order(
                 symbol=symbol,
                 security_id=security_id,
@@ -433,10 +473,12 @@ class ExecutionEngine:
                 quantity=qty,
                 order_type="MARKET",
                 product_type="INTRADAY",
+                exchange_segment=segment,
             )
             broker_order_id = order_result.get("broker_order_id", "")
             if order_result.get("status") == "REJECTED":
-                log.error("Entry order rejected", symbol=symbol, message=order_result.get("message"))
+                log.error("Entry order rejected", symbol=symbol, segment=segment,
+                          message=order_result.get("message"))
                 return
             log.info(
                 "Entry order placed",
@@ -546,6 +588,7 @@ class ExecutionEngine:
             return
 
         try:
+            segment = self._get_segment(cat)
             order_result = await self._dhan.place_order(
                 symbol=symbol,
                 security_id=security_id,
@@ -553,10 +596,12 @@ class ExecutionEngine:
                 quantity=qty,
                 order_type="MARKET",
                 product_type="INTRADAY",
+                exchange_segment=segment,
             )
             broker_order_id = order_result.get("broker_order_id", "")
             if order_result.get("status") == "REJECTED":
-                log.error("Exit order rejected", symbol=symbol, message=order_result.get("message"))
+                log.error("Exit order rejected", symbol=symbol, segment=segment,
+                          message=order_result.get("message"))
                 return
             log.info(
                 "Exit order placed",
@@ -660,6 +705,11 @@ class ExecutionEngine:
             plugin_cls = getattr(module, "StrategyPlugin")
             # Merge default_params with any subscription overrides
             params = dict(cat.default_params or {})
+            # Armed strategies are expected to take entries automatically when
+            # a valid signal fires. ORB v6e, ORB v2, and universal_momentum_straddle
+            # gate their entry branches on this flag — it was never set, making
+            # entry unreachable even with a working LTP feed.
+            params.setdefault("auto_enter", True)
             self._plugins[instance_id] = plugin_cls(instance_id, params)
             log.info("Plugin loaded", instance_id=instance_id, module=module_name)
             return self._plugins[instance_id]
@@ -690,6 +740,16 @@ class ExecutionEngine:
         params = cat.default_params or {}
         # The arm process should resolve and store security_id here
         return str(params.get("security_id", ""))
+
+    def _get_segment(self, cat) -> str:
+        """Return the Dhan exchange_segment for this catalog entry.
+
+        SENSEX → BSE_FNO; NIFTY / BANKNIFTY → NSE_FNO.
+        """
+        underlying = (cat.underlying or "NIFTY").upper()
+        if underlying.startswith("SENSEX") or underlying.startswith("BSE"):
+            return "BSE_FNO"
+        return "NSE_FNO"
 
     def _get_instrument_key(self, cat) -> str:
         """Best-effort Upstox instrument key."""

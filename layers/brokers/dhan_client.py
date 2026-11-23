@@ -62,7 +62,7 @@ class DhanClient(BrokerBase):
         price: float = 0.0,
         product_type: str = "INTRADAY",
         validity: str = "DAY",
-        exchange_segment: str = "NSE_FO",
+        exchange_segment: str = "NSE_FNO",
         client_order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = {
@@ -96,7 +96,7 @@ class DhanClient(BrokerBase):
     # Yahoo has NIFTY (and BANKNIFTY) index tickers but NO free SENSEX one.
     # SENSEX falls back to the Dhan poll only; the Dhan index LTP is the
     # primary source for SENSEX.
-    YAHOO_INDEX = {"NIFTY": "%5ENSEI", "BANKNIFTY": "%5ENSEIBANKNIFTY"}
+    YAHOO_INDEX = {"NIFTY": "%5ENSEI"}
 
     async def get_index_ltp(self, symbol: str = "NSE") -> Optional[float]:
         """Fetch the index spot price for NIFTY/SENSEX/BANKNIFTY.
@@ -145,11 +145,22 @@ class DhanClient(BrokerBase):
             log.warning("Dhan index LTP poll failed", symbol=symbol, error=str(e))
         return None
 
+    # Rate-limit Yahoo index polls: max 1 call per 30s per symbol.
+    _yahoo_ltp_cache: Dict[str, tuple] = {}  # symbol → (ts, value)
+    _YAHOO_MIN_INTERVAL = 30.0
+
     async def _yahoo_index_ltp(self, symbol: str) -> Optional[float]:
-        """Free Yahoo v8 chart API — last close as the spot proxy."""
+        """Free Yahoo v8 chart API — last close as the spot proxy.
+
+        Rate-limited to 1 call per 30s per symbol to avoid hammering Yahoo.
+        """
         import json as _json
         import urllib.request
         code = symbol.upper().replace("_", "")
+        # Rate-limit check
+        cached_entry = self._yahoo_ltp_cache.get(symbol)
+        if cached_entry and (time.time() - cached_entry[0]) < self._YAHOO_MIN_INTERVAL:
+            return cached_entry[1]
         for suffix in ("_CE_PE", "_PE", "_CE"):
             code = code.replace(suffix, "")
         for known in self.YAHOO_INDEX:
@@ -169,7 +180,13 @@ class DhanClient(BrokerBase):
                 return None
             close = (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [None])
             last = [v for v in close if v is not None]
-            return float(last[-1]) if last else None
+            if last:
+                val = float(last[-1])
+                self._yahoo_ltp_cache[symbol] = (time.time(), val)
+                log.debug("Yahoo index LTP resolved", symbol=symbol, ltp=val)
+                return val
+            log.debug("Yahoo index LTP empty", symbol=symbol)
+            return None
         except Exception as e:
             log.warning("Yahoo index LTP poll failed", symbol=symbol, error=str(e))
         return None

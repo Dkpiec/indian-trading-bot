@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 import structlog
@@ -134,15 +135,53 @@ class UpstoxWSV3:
                 lambda: self._queue.put_nowait({"type": "ws_open"})
             )
 
+    _first_tick_logged = False
+
     def _on_message(self, message: Any) -> None:
+        """Bridge SDK ticks into the async queue.
+
+        The SDK's MarketDataStreamerV3.handle_message already decodes
+        the protobuf FeedResponse via json_format.MessageToDict, so
+        `message` is a dict like:
+            {
+                "feeds": {
+                    "NSE_FO|49492": {"ltpc": {"ltp": "250.5", "cp": "250.25"}},
+                    ...
+                },
+                "currentTs": "..."
+            }
+        """
         if not self._loop or not self._running:
             return
         try:
-            self._loop.call_soon_threadsafe(
-                lambda: self._queue.put_nowait({"type": "tick", "data": message})
-            )
+            feeds = message.get("feeds") if isinstance(message, dict) else None
+            if feeds:
+                for key, feed in feeds.items():
+                    ltpc = feed.get("ltpc") or {}
+                    ltp = ltpc.get("ltp")
+                    if ltp is None:
+                        continue
+                    tick = {
+                        "type": "tick",
+                        "instrument_key": key,
+                        "last_price": float(ltp),
+                        "change_percent": float(ltpc.get("cp", 0) or 0),
+                        "ts": time.time(),
+                    }
+                    if not self._first_tick_logged:
+                        self._first_tick_logged = True
+                        log.info("First Upstox WS tick received", instrument_key=key, ltp=tick["last_price"])
+                    self._loop.call_soon_threadsafe(
+                        lambda t=tick: self._queue.put_nowait(t)
+                    )
+            else:
+                # Unknown / malformed message shape — log at warning so it's
+                # visible in the container logs.
+                log.warning("Upstox WS unrecognised message shape", keys=list(message.keys()) if isinstance(message, dict) else type(message).__name__)
         except asyncio.QueueFull:
-            pass  # drop oldest on backpressure
+            pass
+        except Exception as e:
+            log.error("Upstox WS message bridge error", error=str(e))
 
     def _on_error(self, error: Any) -> None:
         log.error("Upstox v3 WS error", error=str(error))

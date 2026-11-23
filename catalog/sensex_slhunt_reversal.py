@@ -44,6 +44,8 @@ Dhan order notes
 from __future__ import annotations
 
 import json
+import structlog
+log = structlog.get_logger(__name__)
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -115,7 +117,8 @@ def _fetch_sensex_5m_candles() -> list:
         # params; the wick threshold is satisfied when the LTP crosses the
         # OR bound. This is a reasonable live proxy for the option-level signal.
         return [(ts, ltp, ltp, ltp, ltp)]
-    except Exception:
+    except Exception as e:
+        log.warning("SENSEX SLHUNT 5m feed failed", error=str(e))
         return []
 
 
