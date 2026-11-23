@@ -90,6 +90,37 @@ class DhanClient(BrokerBase):
             "message": data.get("errorMessage", resp.text),
         }
 
+    async def get_index_ltp(self, symbol: str = "NSE") -> Optional[float]:
+        """Fetch the index spot price (free endpoint) for a Dhan index symbol.
+
+        Accepts a Dhan index code (NIFTY, SENSEX, BANKNIFTY) or an
+        underlying name; maps to the Dhan index security IDs.
+        """
+        index_ids = {"NIFTY": "midev834430579", "SENSEX": "midew834426258"}
+        code = symbol.upper()
+        # Strip trailing option-contract suffixes like NIFTY_25DEC25_CE
+        for suffix in ("_CE", "_PE"):
+            code = code.replace(suffix, "")
+        for known in index_ids:
+            if code.startswith(known):
+                code = known
+                break
+        sid = index_ids.get(code)
+        if not sid:
+            return None
+        try:
+            url = f"{DHAN_BASE}/quotes"
+            payload = {"securityId": sid, "exchangeSegment": "INDEX"}
+            resp = await self._http.post(url, json=payload, headers=self._headers())
+            if resp.status_code == 200:
+                items = resp.json().get("data", {}).get("data", [])
+                if items:
+                    last = items[0].get("lastPrice")
+                    return float(last) if last else None
+        except Exception as e:
+            log.debug("Dhan index LTP poll failed", symbol=symbol, error=str(e))
+        return None
+
     async def get_option_ltp(self, symbol: str, security_id: str = "") -> Optional[float]:
         """Fetch latest LTP for an option contract via Dhan option chain.
 

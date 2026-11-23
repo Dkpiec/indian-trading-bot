@@ -98,12 +98,22 @@ class MarketDataFeed:
             return cached["ltp"]
 
         # 2. Dhan fallback: poll quotes for the security_id
-        if self._dhan and security_id:
+        if self._dhan:
             try:
-                ltp = await self._dhan.get_option_ltp(symbol or security_id, security_id=security_id)
-                if ltp is not None:
-                    self._ticks[instrument_key] = {"ltp": ltp, "ts": time.time(), "src": "dhan"}
-                    return ltp
+                if security_id:
+                    ltp = await self._dhan.get_option_ltp(symbol or security_id, security_id=security_id)
+                    if ltp is not None:
+                        self._ticks[instrument_key] = {"ltp": ltp, "ts": time.time(), "src": "dhan"}
+                        return ltp
+                else:
+                    # No contract resolved (arming not done): use the index spot
+                    # so breakout/breakdown strategies can still evaluate.
+                    spot = await self._dhan.get_index_ltp(symbol)
+                    if spot is not None:
+                        self._ticks[instrument_key] = {"ltp": spot, "ts": time.time(), "src": "dhan_spot"}
+                        return spot
+                    log.debug("No LTP available (contract not armed, index poll failed)",
+                              instrument_key=instrument_key, symbol=symbol)
             except Exception as e:
                 log.debug("Dhan LTP poll failed", security_id=security_id, error=str(e))
 
