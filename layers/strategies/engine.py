@@ -199,6 +199,11 @@ class MarketDataFeed:
                     spot = await self._dhan.get_index_ltp(symbol)
                     if spot is not None:
                         self._ticks[instrument_key] = {"ltp": spot, "ts": time.time(), "src": "dhan_spot"}
+                        # Cache the index LTP so the option auto-resolver can
+                        # compute the OTM strike for this underlying.
+                        if symbol:
+                            global _index_ltp_cache
+                            _index_ltp_cache[symbol.upper()] = (float(spot), time.time())
                         return spot
                     log.debug("No LTP available (contract not armed, index poll failed)",
                               instrument_key=instrument_key, symbol=symbol)
@@ -233,6 +238,81 @@ class MarketDataFeed:
 _UPSTOX_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
 _instruments_index: Dict[tuple, str] = {}
 _instruments_loaded_at: float = 0.0
+# Cached auto-resolved option keys: (segment, underlying, option_type) -> instrument_key
+# Recomputed each market session; cleared at expiry.
+_auto_key_cache: Dict[tuple, str] = {}
+# Cached index LTP used for strike computation: underlying -> (ltp, ts)
+_index_ltp_cache: Dict[str, tuple] = {}
+
+
+def _strike_interval(underlying: str) -> float:
+    """Option strike spacing per underlying (NIFTY 50, SENSEX 100, BANKNIFTY 100)."""
+    u = (underlying or "").upper()
+    if u.startswith("SENSEX"):
+        return 100.0
+    if u.startswith("BANKNIFTY") or u.startswith("BANK"):
+        return 100.0
+    return 50.0
+
+
+def _next_weekly_expiry(underlying: str, dte_days: int = 5) -> str:
+    """Compute the next weekly expiry ISO date.
+
+    NSE (NIFTY/BANKNIFTY) options expire Thursday; BSE (SENSEX) expire Friday.
+    For a 'dte 5' strategy we want the expiry ~5 days out on the next weekly
+    cycle.
+    """
+    from datetime import date, timedelta
+    today = date.today()
+    u = (underlying or "NIFTY").upper()
+    target_weekday = 4 if u.startswith("SENSEX") else 3  # BSE=Fri, NSE=Thu
+    offset = max(dte_days - 5, 0)
+    target = today + timedelta(days=offset)
+    while target.weekday() != target_weekday:
+        target += timedelta(days=1)
+    return target.isoformat()
+
+
+def _compute_option_strike(index_ltp: float, underlying: str, option_type: str) -> int:
+    """Nearest OTM option strike to the index LTP.
+
+    CE: strike at/just above spot (first OTM call).
+    PE: strike at/just below spot (first OTM put).
+    """
+    step = _strike_interval(underlying)
+    spot = float(index_ltp)
+    atm = int(round(spot / step)) * step
+    opt = option_type.upper()
+    if opt == "PE":
+        # First OTM put: strike below spot.
+        return int(atm if atm < spot else atm - step)
+    # CE: first OTM call: strike above spot.
+    return int(atm if atm > spot else atm + step)
+
+
+def _resolve_option_key(
+    underlying: str, segment: str, option_type: str,
+    strike: float, expiry: str, index_ltp: Optional[float] = None,
+) -> str:
+    """Resolve an Upstox option instrument key.
+
+    If strike/expiry are missing, compute them from the index LTP:
+      * expiry = next weekly expiry (~dte 5)
+      * strike = nearest OTM option strike to the index LTP
+    Then look up the real "SEG|numeric_id" in the instruments JSON.
+    Returns a readable label only as a last resort.
+    """
+    u = (underlying or "NIFTY").upper()
+    if not strike or strike <= 0:
+        if index_ltp:
+            strike = _compute_option_strike(index_ltp, u, option_type)
+        else:
+            strike = 0
+    if not expiry:
+        # Default to ~5 DTE weekly expiry.
+        expiry = _next_weekly_expiry(u, 5)
+    key = resolve_instrument_key(u, float(strike), expiry, option_type, segment)
+    return key
 
 
 def _load_upstox_instruments(force: bool = False) -> bool:
@@ -999,14 +1079,45 @@ class ExecutionEngine:
             strike_f = 0.0
         if strike_f > 0 and expiry:
             return resolve_instrument_key(underlying, strike_f, expiry, option_type, segment)
-        # No strike/expiry in params — use the readable label (valid for Dhan,
-        # NOT for Upstox WS; the WS server will drop it). Log so operators
-        # know to set strike/expiry via /api/v1/strategies/upsert.
-        log.warning("Instrument key unresolved (no strike/expiry in params) "
-                    "— WS subscription will be dropped",
+        # No strike/expiry in params — auto-resolve the OTM option strike and
+        # weekly expiry from the live index LTP so the Upstox WS gets a real
+        # "SEG|numeric_id" key (a readable label would be silently dropped).
+        # The index LTP is cached per-underlying and refreshed when stale.
+        if self._auto_resolve_index_ltp(underlying):
+            auto_strike = _compute_option_strike(_index_ltp_cache.get(underlying, (0, 0))[0], underlying, option_type)
+            auto_expiry = _next_weekly_expiry(underlying, 5)
+            cache_key = (segment, underlying, option_type.upper())
+            cached = _auto_key_cache.get(cache_key)
+            if not cached:
+                auto_key = _resolve_option_key(underlying, segment, option_type, auto_strike, auto_expiry)
+                _auto_key_cache[cache_key] = auto_key
+                log.info("Auto-resolved option key", segment=segment, underlying=underlying,
+                         option_type=option_type, strike=auto_strike, expiry=auto_expiry,
+                         instrument_key=auto_key)
+                return auto_key
+            return cached
+        # No index LTP available yet — fall back to the readable label (WS
+        # will drop it until the index LTP lands and we re-resolve).
+        log.warning("Instrument key unresolved (no strike/expiry in params, no index LTP yet)",
                     underlying=underlying, segment=segment,
                     strike=strike, expiry=expiry, option_type=option_type)
         return f"{segment}|{strike}_{underlying}_{option_type}"
+
+    def _auto_resolve_index_ltp(self, underlying: str) -> bool:
+        """Return True when a fresh index LTP is cached for the underlying.
+
+        The actual fetch happens in MarketDataFeed.get_ltp() (async, via
+        Dhan/Yahoo index poll). This helper only checks the cache so it can
+        be called from the sync _get_instrument_key() without awaiting. The
+        cache is populated by the async _process_subscription() path which
+        calls get_ltp() for the index symbol each tick.
+        """
+        u = (underlying or "").upper()
+        now = time.time()
+        cached = _index_ltp_cache.get(u)
+        if cached and (now - cached[1]) < 300:  # 5-min freshness
+            return cached[0] > 0
+        return False
 
     def _in_market_hours(self) -> bool:
         """Check if NSE options market is open (09:15-15:30 IST, Mon-Fri)."""
