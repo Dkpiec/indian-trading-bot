@@ -716,9 +716,23 @@ class ExecutionEngine:
 
         Arming is the is_armed boolean on user_subscriptions (there is no
         status column). Mirrors the join in tick().
+
+        On the first call, fetch index LTPs so _get_instrument_key() can
+        auto-resolve option strikes (the index LTP cache starts empty; the
+        Dhan poll may already be disabled for this process if it 404'd
+        during a prior window).
         """
-        from sqlalchemy import select
         from layers.state.models import UserSubscription, StrategyCatalog
+        from sqlalchemy import select
+
+        # Prime the index LTP cache for every distinct underlying so that
+        # _get_instrument_key() has a spot to compute the OTM strike. This
+        # runs only on the first _collect_armed_keys() call (the flag
+        # prevents re-fetching on later calls).
+        if not getattr(self, "_index_ltp_primed", False):
+            self._index_ltp_primed = True
+            await self._prime_index_ltps()
+
         keys: List[str] = []
         async with self._session_factory() as session:
             result = await session.execute(
@@ -740,6 +754,32 @@ class ExecutionEngine:
                     continue
                 keys.append(self._get_instrument_key(cat))
         return keys
+
+    async def _prime_index_ltps(self) -> None:
+        """Fetch index LTPs for all distinct underlyings (NIFTY, SENSEX, ...)
+        so the option auto-resolver has a spot to compute strikes. Uses the
+        Dhan index poll (free for SENSEX; NIFTY has a free Yahoo fallback).
+        Failures are non-fatal — the strategy will just log 'no index LTP
+        yet' until the next tick.
+        """
+        from layers.state.models import StrategyCatalog
+        from sqlalchemy import select, distinct
+
+        try:
+            async with self._session_factory() as session:
+                result = await session.execute(
+                    select(distinct(StrategyCatalog.underlying))
+                )
+                underlyings = [u for (u,) in result.all() if u]
+            for u in underlyings:
+                # Force the Dhan poll path (index LTP) via the feed.
+                spot = await self._feed.get_ltp(f"{u.upper()}|INDEX", symbol=u.upper())
+                if spot:
+                    _index_ltp_cache[u.upper()] = (float(spot), time.time())
+                    log.debug("Index LTP primed for option auto-resolve",
+                              underlying=u, ltp=spot)
+        except Exception as e:  # noqa: BLE001
+            log.debug("Index LTP priming failed", error=str(e))
 
     def _entry_window_open(self) -> bool:
         """True only inside the 09:45:05-13:15:00 IST weekday entry window."""

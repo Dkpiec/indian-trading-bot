@@ -90,6 +90,24 @@ class UpstoxWSV3:
             instrumentKeys=instrument_keys,
             mode=mode,
         )
+        # The SDK's __init__ sets self.feeder=None; the feeder is only created
+        # on connect(). Our patched connect() builds it, so create it up front
+        # to avoid a NoneType reference before the first connect.
+        try:
+            from upstox_client.feeder.market_data_feeder_v3 import MarketDataFeederV3
+            if self._streamer.feeder is None:
+                self._streamer.feeder = MarketDataFeederV3(
+                    api_client=api_client,
+                    instrumentKeys=instrument_keys,
+                    mode=mode,
+                    on_open=self._streamer.on_open,
+                    on_message=self._streamer.on_message,
+                    on_error=self._streamer.on_error,
+                    on_close=self._streamer.on_close,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Upstox WS feeder pre-init failed (will be created on connect)",
+                        error=str(e))
         self._feeder = self._streamer.feeder
         self._keys = list(instrument_keys)
         self._mode = mode
