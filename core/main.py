@@ -29,46 +29,45 @@ def _run_alembic_upgrade(cfg) -> None:
 engine = None
 async_session_factory = None
 _db_available = False
+_db_init_attempted = False
 
-def _init_database() -> None:
-    """Initialize the async database engine. Sets globals on success.
-    
+
+async def _init_database_async() -> None:
+    """Initialize the async database engine. Must be called from async context.
+
     If the target database doesn't exist yet, connects to the 'postgres'
     maintenance database and creates it first.
     """
-    global engine, async_session_factory, _db_available
+    global engine, async_session_factory, _db_available, _db_init_attempted
+    if _db_init_attempted:
+        return
+
+    _db_init_attempted = True
     try:
         db_url = settings.database_url
         db_name = db_url.rstrip('/').split('/')[-1]
 
-        import asyncio
         from sqlalchemy import text
 
         # Test connection to target DB; if it doesn't exist, create it
-        def _ensure_database():
-            """Sync helper: test DB connection, create DB if missing."""
-            test_engine = create_async_engine(db_url, pool_size=1, echo=False)
-
-            async def _run():
-                try:
-                    async with test_engine.connect() as conn:
-                        await conn.execute(text("SELECT 1"))
-                except Exception:
-                    # Database doesn't exist — create it via 'postgres' DB
-                    admin_url = db_url.replace(f"/{db_name}", "/postgres")
-                    admin_engine = create_async_engine(admin_url, pool_size=1, echo=False)
-                    try:
-                        async with admin_engine.connect() as admin_conn:
-                            await admin_conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-                            await admin_conn.commit()
-                    finally:
-                        await admin_engine.dispose()
-                finally:
-                    await test_engine.dispose()
-
-            asyncio.run(_run())
-
-        _ensure_database()
+        test_engine = create_async_engine(db_url, pool_size=1, echo=False)
+        try:
+            async with test_engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            log.info("Database connection OK", db=db_name)
+        except Exception:
+            # Database doesn't exist — create it via 'postgres' DB
+            admin_url = db_url.replace(f"/{db_name}", "/postgres")
+            admin_engine = create_async_engine(admin_url, pool_size=1, echo=False)
+            try:
+                async with admin_engine.connect() as admin_conn:
+                    await admin_conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+                    await admin_conn.commit()
+                    log.info("Created database", db=db_name)
+            finally:
+                await admin_engine.dispose()
+        finally:
+            await test_engine.dispose()
 
         # Now create the main engine (DB should exist)
         engine = create_async_engine(
@@ -85,7 +84,8 @@ def _init_database() -> None:
         log.warning("Database engine init failed — running in degraded mode", error=str(e))
         _db_available = False
 
-_init_database()
+# Database init is deferred to lifespan (async-safe)
+# _db_available is set to True after _init_database_async() succeeds in lifespan
 
 _redis_pool = None
 
@@ -104,14 +104,11 @@ async def get_redis():
 
 
 # ---------------------------------------------------------------------------
-# Credential router (singleton) — may be None in degraded mode
+# Credential router (singleton) — initialized in lifespan after DB is ready
 # ---------------------------------------------------------------------------
 
-if _db_available and async_session_factory is not None:
-    cred_router = MasterCredentialRouter(async_session_factory)
-else:
-    cred_router = None
-    log.warning("Credential router disabled — database unavailable")
+cred_router = None
+# Will be set in lifespan() after _init_database_async() succeeds
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +119,17 @@ else:
 async def lifespan(app: FastAPI):
     """Startup/shutdown hooks."""
     log.info("Indian Trading Bot starting", version="4.0.0")
+
+    # Initialize database (async-safe)
+    global cred_router
+    await _init_database_async()
+
+    # Initialize credential router now that DB is available
+    if _db_available and async_session_factory is not None:
+        cred_router = MasterCredentialRouter(async_session_factory)
+        log.info("Credential router initialized")
+    else:
+        log.warning("Credential router disabled — database unavailable")
 
     # Run Alembic migrations on startup (async-safe: no asyncio.run())
     if _db_available:
