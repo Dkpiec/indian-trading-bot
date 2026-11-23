@@ -527,14 +527,25 @@ class ExecutionEngine:
         return state
 
     async def _collect_armed_keys(self) -> List[str]:
-        """Collect Upstox instrument keys for all armed subscriptions."""
+        """Collect Upstox instrument keys for all armed subscriptions.
+
+        Arming is the is_armed boolean on user_subscriptions (there is no
+        status column). Mirrors the join in tick().
+        """
         from sqlalchemy import select
         from layers.state.models import UserSubscription, StrategyCatalog
         keys: List[str] = []
         async with self._session_factory() as session:
-            subs = (await session.execute(
-                select(UserSubscription).where(UserSubscription.status == "armed")
-            )).scalars().all()
+            result = await session.execute(
+                select(UserSubscription).join(
+                    StrategyCatalog,
+                    UserSubscription.catalog_id == StrategyCatalog.id,
+                ).where(
+                    UserSubscription.is_armed == True,   # noqa: E712
+                    StrategyCatalog.is_active == True,   # noqa: E712
+                )
+            )
+            subs = result.scalars().all()
             for sub in subs:
                 cat_res = await session.execute(
                     select(StrategyCatalog).where(StrategyCatalog.id == sub.catalog_id)

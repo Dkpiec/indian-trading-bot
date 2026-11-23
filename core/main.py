@@ -247,10 +247,13 @@ async def lifespan(app: FastAPI):
             access_token=settings.upstox_access_token,
             analytics_token=settings.upstox_analytics_token,
         )
-        # Don't start streaming yet — subscribe when strategies arm
-        log.info("Upstox v3 WS adapter ready (not yet connected)", token_type="analytics" if settings.upstox_analytics_token else "access")
+        # Don't start streaming yet — ExecutionEngine.start() connects the
+        # feed and subscribes the armed instruments. The analytics token is
+        # valid for 1 year, so no refresh logic is needed.
+        token_kind = "analytics(1y)" if settings.upstox_analytics_token else "access(short)"
+        log.info("Upstox v3 WS adapter ready (not yet connected)", token_type=token_kind)
     else:
-        log.warning("No Upstox token available — v3 WS disabled")
+        log.warning("No Upstox token available — v3 WS disabled; LTP will run on Dhan poll only")
     app.state.upstox_ws = upstox_ws
 
     # ------------------------------------------------------------------

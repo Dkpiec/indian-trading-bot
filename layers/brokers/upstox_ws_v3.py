@@ -117,6 +117,16 @@ class UpstoxWSV3:
                          count=len(instrument_keys))
             except Exception as e:
                 log.error("Upstox v3 WS initial subscribe failed", error=str(e))
+        # Final health check: if the socket still isn't open after the retry,
+        # the WS is down. Log loudly so the Dhan fallback is a conscious
+        # degradation, not a silent one.
+        feeder = self._streamer.feeder
+        if not (feeder and feeder.ws and feeder.ws.sock):
+            log.error(
+                "Upstox v3 WS NOT AVAILABLE — engine will run on Dhan fallback. "
+                "Check analytics token validity and network egress.",
+                instruments=len(instrument_keys),
+            )
 
     async def stop(self) -> None:
         """Disconnect gracefully."""
