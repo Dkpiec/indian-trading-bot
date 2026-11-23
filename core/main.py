@@ -133,7 +133,8 @@ async def lifespan(app: FastAPI):
         log.warning("Credential router disabled — database unavailable")
 
     # Run Alembic migrations on startup (async-safe: no asyncio.run())
-    if _db_available:
+    global engine
+    if _db_available and engine is not None:
         try:
             from sqlalchemy import text
             async with engine.begin() as conn:
