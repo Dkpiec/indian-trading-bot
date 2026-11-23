@@ -57,7 +57,14 @@ async def list_catalog():
                 "status": "ok",
             }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+        # DB unavailable at runtime — fall back to in-memory catalog
+        from layers.state.fallback_db import get_catalog
+        strategies = await get_catalog()
+        return {
+            "strategies": strategies,
+            "status": "degraded",
+            "message": f"Database unavailable ({e}) — using in-memory fallback catalog",
+        }
 
 
 @router.post("/subscribe")
