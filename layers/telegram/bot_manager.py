@@ -78,6 +78,15 @@ class BotManager:
         self._chat_user_map: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
+    def set_dhan_client(self, dhan_client) -> None:
+        """Late-bind the Dhan client once the broker layer is ready.
+
+        The bot is constructed BEFORE the Dhan client exists, so the initial
+        assignment can be None. Callers that start the broker later must
+        re-bind via this method or /balance will report 'client not available'.
+        """
+        self._app_state_dhan_client = dhan_client
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

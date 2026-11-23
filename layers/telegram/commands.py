@@ -719,7 +719,19 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     bot_mgr = context.bot_data["bot_manager"]
 
     # Try Dhan client first (stored on app.state during lifespan)
-    dhan_client = bot_mgr._app_state_dhan_client if hasattr(bot_mgr, "_app_state_dhan_client") else None
+    dhan_client = None
+    if hasattr(bot_mgr, "_app_state_dhan_client") and bot_mgr._app_state_dhan_client is not None:
+        dhan_client = bot_mgr._app_state_dhan_client
+    # Late-bind path: the engine may have started the broker after bot init.
+    if dhan_client is None and hasattr(bot_mgr, "dhan_client") and bot_mgr.dhan_client is not None:
+        dhan_client = bot_mgr.dhan_client
+        # Sync the BotManager's cached reference so subsequent calls are fast.
+        bot_mgr._app_state_dhan_client = dhan_client
+
+    # Late-bind the Dhan client if it was unavailable at init time. The
+    # broker layer starts after the bot, so the cached reference is None.
+    if bot_manager._app_state_dhan_client is None and dhan_client is not None:
+        bot_manager.set_dhan_client(dhan_client)
 
     if not dhan_client:
         if update.message:
@@ -873,7 +885,14 @@ async def cmd_forceexit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("ℹ️ No open positions to close.")
         return
 
-    dhan_client = bot_mgr._app_state_dhan_client if hasattr(bot_mgr, "_app_state_dhan_client") else None
+    dhan_client = None
+    if hasattr(bot_mgr, "_app_state_dhan_client") and bot_mgr._app_state_dhan_client is not None:
+        dhan_client = bot_mgr._app_state_dhan_client
+    # Late-bind path: the engine may have started the broker after bot init.
+    if dhan_client is None and hasattr(bot_mgr, "dhan_client") and bot_mgr.dhan_client is not None:
+        dhan_client = bot_mgr.dhan_client
+        # Sync the BotManager's cached reference so subsequent calls are fast.
+        bot_mgr._app_state_dhan_client = dhan_client
 
     closed = 0
     errors = []
@@ -990,7 +1009,14 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     bot_mgr = context.bot_data["bot_manager"]
     from core.config import settings
 
-    dhan_client = bot_mgr._app_state_dhan_client if hasattr(bot_mgr, "_app_state_dhan_client") else None
+    dhan_client = None
+    if hasattr(bot_mgr, "_app_state_dhan_client") and bot_mgr._app_state_dhan_client is not None:
+        dhan_client = bot_mgr._app_state_dhan_client
+    # Late-bind path: the engine may have started the broker after bot init.
+    if dhan_client is None and hasattr(bot_mgr, "dhan_client") and bot_mgr.dhan_client is not None:
+        dhan_client = bot_mgr.dhan_client
+        # Sync the BotManager's cached reference so subsequent calls are fast.
+        bot_mgr._app_state_dhan_client = dhan_client
     broker_status = "✅ DhanHQ connected" if dhan_client else "❌ DhanHQ not available"
 
     upstox_ok = bool(getattr(settings, "upstox_access_token", None))
