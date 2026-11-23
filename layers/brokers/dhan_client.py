@@ -143,18 +143,27 @@ class DhanClient(BrokerBase):
         if not sid:
             return None
         try:
-            # Dhan v2 live quote endpoint (free, not historical data).
-            url = f"{DHAN_BASE}/market/quote"
+            # Dhan v2 live-quote endpoint (free, not historical data).
+            # Endpoint is POST /v2/quotes (not /market/quote) — the latter
+            # 404s, which is why the SENSEX index poll kept failing.
+            url = f"{DHAN_BASE}/quotes"
             payload = {"securityId": sid, "exchangeSegment": "INDEX"}
             resp = await self._http.post(url, json=payload, headers=self._headers())
             if resp.status_code == 200:
-                items = resp.json().get("data", {}).get("data", [])
+                body = resp.json()
+                # Dhan v2 /quotes returns data.data[] (list of quotes). Some
+                # versions return data as a dict keyed by security_id — handle
+                # both.
+                inner = body.get("data", {})
+                items = inner.get("data", []) if isinstance(inner, dict) else []
+                if not items and isinstance(inner, dict):
+                    items = [v for v in inner.values() if isinstance(v, dict)]
                 if items:
                     last = items[0].get("lastPrice")
                     if last:
                         return float(last)
                 log.debug("Dhan index LTP empty response", symbol=symbol,
-                          status=resp.status_code, body=str(resp.text)[:200])
+                          status=resp.status_code, body=str(body)[:200])
             else:
                 log.debug("Dhan index LTP HTTP error", symbol=symbol,
                           status=resp.status_code, body=str(resp.text)[:200])

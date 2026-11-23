@@ -238,8 +238,11 @@ class MarketDataFeed:
 _UPSTOX_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
 _instruments_index: Dict[tuple, str] = {}
 _instruments_loaded_at: float = 0.0
+# Secondary index: (segment, underlying, option_type) -> list of (expiry_iso, strike, instrument_key)
+# Used by the auto-resolver to pick the nearest real OTM contract when the
+# computed expiry/strike isn't in the primary index.
+_instruments_by_underlying: Dict[tuple, list] = {}
 # Cached auto-resolved option keys: (segment, underlying, option_type) -> instrument_key
-# Recomputed each market session; cleared at expiry.
 _auto_key_cache: Dict[tuple, str] = {}
 # Cached index LTP used for strike computation: underlying -> (ltp, ts)
 _index_ltp_cache: Dict[str, tuple] = {}
@@ -273,6 +276,54 @@ def _next_weekly_expiry(underlying: str, dte_days: int = 5) -> str:
     return target.isoformat()
 
 
+def _find_nearest_option_key(
+    segment: str, underlying: str, option_type: str,
+    target_strike: float, target_expiry: str,
+) -> Optional[str]:
+    """Pick the real 'SEG|numeric_id' option contract closest to
+    (target_strike, target_expiry) from the instruments JSON.
+
+    Tries the exact (segment, expiry, strike, opt_type) first; on a miss it
+    scans the same underlying+segment for the strike nearest target_strike
+    (prefer expiry within 2 days of target, else the nearest expiry that has
+    that strike). Returns None when the underlying has no options at all
+    (e.g. SENSEX, which has no Upstox options contract).
+    """
+    global _instruments_index
+    opt = option_type.upper()
+    u = (underlying or "").upper()
+    # 1. Exact hit.
+    exact = _instruments_index.get((segment, target_expiry, float(target_strike), opt))
+    if exact:
+        return exact
+    # 2. Nearest strike in the same underlying + segment.
+    cands = _instruments_by_underlying.get((segment, u, opt), [])
+    if not cands:
+        return None
+    # Prefer strikes within 2 days of target_expiry, else all.
+    import datetime as _dt
+    target_date = _dt.date.fromisoformat(target_expiry)
+    near = [
+        (exp, st, k) for (exp, st, k) in cands
+        if abs((_dt.date.fromisoformat(exp) - target_date).days) <= 2
+    ]
+    pool = near or cands
+    # Among the pool, pick the strike closest to target_strike; tie-break to
+    # the most OTM side (CE -> strike >= spot, PE -> strike <= spot).
+    def _score(triple):
+        exp, st, k = triple
+        st = float(st)
+        if opt == "PE":
+            # Prefer strikes <= target; penalty grows as we go OTM (below).
+            diff = target_strike - st
+            return (abs(diff), st)
+        # CE: prefer strikes >= target; penalty grows as we go ITM (above).
+        diff = st - target_strike
+        return (abs(diff), st)
+    pool.sort(key=lambda t: _score(t))
+    return pool[0][2]
+
+
 def _compute_option_strike(index_ltp: float, underlying: str, option_type: str) -> int:
     """Nearest OTM option strike to the index LTP.
 
@@ -296,23 +347,26 @@ def _resolve_option_key(
 ) -> str:
     """Resolve an Upstox option instrument key.
 
-    If strike/expiry are missing, compute them from the index LTP:
-      * expiry = next weekly expiry (~dte 5)
-      * strike = nearest OTM option strike to the index LTP
-    Then look up the real "SEG|numeric_id" in the instruments JSON.
-    Returns a readable label only as a last resort.
+    If strike/expiry are missing, compute them from the index LTP, then look
+    up the real "SEG|numeric_id". If the exact (expiry, strike) isn't in the
+    index, fall back to the nearest real OTM contract for the same
+    underlying+segment+option_type. Returns a readable label only when the
+    underlying has no Upstox options at all (e.g. SENSEX).
     """
     u = (underlying or "NIFTY").upper()
     if not strike or strike <= 0:
-        if index_ltp:
-            strike = _compute_option_strike(index_ltp, u, option_type)
-        else:
-            strike = 0
+        strike = _compute_option_strike(index_ltp, u, option_type) if index_ltp else 0
     if not expiry:
-        # Default to ~5 DTE weekly expiry.
         expiry = _next_weekly_expiry(u, 5)
-    key = resolve_instrument_key(u, float(strike), expiry, option_type, segment)
-    return key
+    # 1. Try the exact key, then the nearest real contract.
+    resolved = _find_nearest_option_key(segment, u, option_type, strike, expiry)
+    if resolved:
+        return resolved
+    # 2. No options for this underlying on this segment — readable label.
+    log.warning("No Upstox option found for underlying — key will be dropped by WS",
+                underlying=u, segment=segment, option_type=option_type,
+                strike=strike, expiry=expiry)
+    return f"{segment}|{int(strike)}_{u}_{option_type.upper()}"
 
 
 def _load_upstox_instruments(force: bool = False) -> bool:
@@ -322,7 +376,7 @@ def _load_upstox_instruments(force: bool = False) -> bool:
     (the full "SEGMENT|exchange_token" string, e.g. "NSE_FO|12345").
     Cached for 1 hour — the file refreshes daily at ~6 AM IST.
     """
-    global _instruments_index, _instruments_loaded_at
+    global _instruments_index, _instruments_loaded_at, _instruments_by_underlying
     import time as _time
     now = _time.time()
     if not force and _instruments_index and (now - _instruments_loaded_at) < 3600:
@@ -341,6 +395,7 @@ def _load_upstox_instruments(force: bool = False) -> bool:
             data = json.loads(gzip.decompress(resp.read()).decode())
         _instruments_loaded_at = now
         _instruments_index.clear()
+        _instruments_by_underlying.clear()
         from datetime import datetime as _dt, timezone as _tz
         for entry in data:
             seg = entry.get("segment", "")
@@ -358,6 +413,10 @@ def _load_upstox_instruments(force: bool = False) -> bool:
             if not instrument_key or opt_type not in ("CE", "PE"):
                 continue
             _instruments_index[(seg, expiry_iso, float(strike or 0), opt_type)] = instrument_key
+            # Secondary index for the nearest-option fallback.
+            _instruments_by_underlying.setdefault((seg, underlying, opt_type), []).append(
+                (expiry_iso, float(strike or 0), instrument_key)
+            )
         log.info("Upstox instruments indexed", count=len(_instruments_index))
         return True
     except Exception as e:
@@ -1082,20 +1141,22 @@ class ExecutionEngine:
         # No strike/expiry in params — auto-resolve the OTM option strike and
         # weekly expiry from the live index LTP so the Upstox WS gets a real
         # "SEG|numeric_id" key (a readable label would be silently dropped).
-        # The index LTP is cached per-underlying and refreshed when stale.
+        # The index LTP is cached per-underlying (populated in get_ltp()).
+        # For SENSEX the index LTP comes from the Dhan poll (Yahoo has no
+        # free SENSEX ticker); NIFTY uses the free Yahoo source.
         if self._auto_resolve_index_ltp(underlying):
-            auto_strike = _compute_option_strike(_index_ltp_cache.get(underlying, (0, 0))[0], underlying, option_type)
+            cached_key = _auto_key_cache.get((segment, underlying, option_type.upper()))
+            if cached_key:
+                return cached_key
+            index_ltp = _index_ltp_cache.get(underlying.upper(), (0, 0))[0]
+            auto_strike = _compute_option_strike(index_ltp, underlying, option_type)
             auto_expiry = _next_weekly_expiry(underlying, 5)
-            cache_key = (segment, underlying, option_type.upper())
-            cached = _auto_key_cache.get(cache_key)
-            if not cached:
-                auto_key = _resolve_option_key(underlying, segment, option_type, auto_strike, auto_expiry)
-                _auto_key_cache[cache_key] = auto_key
-                log.info("Auto-resolved option key", segment=segment, underlying=underlying,
-                         option_type=option_type, strike=auto_strike, expiry=auto_expiry,
-                         instrument_key=auto_key)
-                return auto_key
-            return cached
+            auto_key = _resolve_option_key(underlying, segment, option_type, auto_strike, auto_expiry, index_ltp=index_ltp)
+            _auto_key_cache[(segment, underlying, option_type.upper())] = auto_key
+            log.info("Auto-resolved option key", segment=segment, underlying=underlying,
+                     option_type=option_type, strike=auto_strike, expiry=auto_expiry,
+                     index_ltp=index_ltp, instrument_key=auto_key)
+            return auto_key
         # No index LTP available yet — fall back to the readable label (WS
         # will drop it until the index LTP lands and we re-resolve).
         log.warning("Instrument key unresolved (no strike/expiry in params, no index LTP yet)",
