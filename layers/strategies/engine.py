@@ -351,7 +351,6 @@ class ExecutionEngine:
             # date (the Date type collides with the DB column type name and breaks
             # the query). The 00:00 start of day is the correct boundary in IST.
             from sqlalchemy import func as _func
-            from sqlalchemy.sql import func as _sqlfunc
             today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
             result = await session.execute(
                 select(_func.count()).where(
