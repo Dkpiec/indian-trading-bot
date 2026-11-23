@@ -18,15 +18,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Install wheels from local wheelhouse (skip upstox_client if not present)
+# Install wheels from local wheelhouse.
 COPY wheelhouse/ /tmp/wheelhouse/
 RUN pip install --no-deps /tmp/wheelhouse/*.whl 2>/dev/null || true && \
-    if [ -d /tmp/wheelhouse/upstox_client ] && [ -f /tmp/wheelhouse/upstox_client/setup.py ] || [ -f /tmp/wheelhouse/upstox_client/pyproject.toml ]; then \
-        pip install /tmp/wheelhouse/upstox_client/; \
-    else \
-        echo "WARN: upstox_client not found or not installable, skipping"; \
-    fi && \
     rm -rf /tmp/wheelhouse
+
+# upstox_client ships as a raw package dir (no setup.py/pyproject.toml), so
+# pip install of a directory fails. Copy it straight into site-packages.
+COPY wheelhouse/upstox_client /tmp/upstox_client_pkg/
+RUN SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+    if [ -d /tmp/upstox_client_pkg ]; then \
+        cp -r /tmp/upstox_client_pkg "$SITE"/upstox_client && \
+        echo "upstox_client installed into $SITE"; \
+    else \
+        echo "WARN: upstox_client package not found in wheelhouse"; \
+    fi && \
+    rm -rf /tmp/upstox_client_pkg
 
 # Copy application code
 COPY . .

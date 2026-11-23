@@ -34,7 +34,7 @@ class UpstoxWSV3:
     def __init__(self, *, access_token: str = "", analytics_token: str = ""):
         # Prefer long-lived analytics token for v3 WS; fall back to short-lived access token
         self._access_token = analytics_token or access_token
-        self._queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=10_000)
+        self._queue: Optional[asyncio.Queue] = None
         self._streamer = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running = False
@@ -56,8 +56,22 @@ class UpstoxWSV3:
             return
 
         self._loop = asyncio.get_running_loop()
+        # Create the queue inside the running loop (lazy, so it binds to the
+        # active event loop on any Python version).
+        self._queue = asyncio.Queue(maxsize=10_000)
 
-        # Import here so the wheelhouse path is resolved at runtime
+        # Import here so the wheelhouse path is resolved at runtime. If the
+        # SDK was not installed into site-packages (image built before the
+        # Dockerfile fix), add the in-repo wheelhouse dir to sys.path as a
+        # fallback.
+        import os as _os
+        import sys as _sys
+        # The adapter is at <app-root>/layers/brokers/upstox_ws_v3.py, so
+        # three dirname levels up is the app root (which contains wheelhouse/).
+        _app_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+        _wh = _os.path.join(_app_root, "wheelhouse")
+        if _os.path.isdir(_os.path.join(_wh, "upstox_client")) and _wh not in _sys.path:
+            _sys.path.insert(0, _wh)
         from upstox_client.feeder.market_data_streamer_v3 import MarketDataStreamerV3
         from upstox_client.api_client import ApiClient
         from upstox_client.configuration import Configuration
@@ -153,8 +167,16 @@ class UpstoxWSV3:
             log.info("Upstox WS unsubscribed", keys=len(instrument_keys))
 
     async def ticks(self):
-        """Async generator yielding parsed tick dicts."""
+        """Async generator yielding parsed tick dicts.
+
+        Yields nothing until start() has been called (the queue is created
+        in start()). The engine only begins consuming ticks after start(),
+        so this guard is defensive.
+        """
         while self._running:
+            if self._queue is None:
+                await asyncio.sleep(0.2)
+                continue
             try:
                 tick = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 yield tick
