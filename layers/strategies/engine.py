@@ -215,12 +215,18 @@ class ExecutionEngine:
         from layers.state.models import UserSubscription, StrategyCatalog
 
         # 1. Find all armed subscriptions
+        from sqlalchemy import select
         async with self._session_factory() as session:
             result = await session.execute(
-                UserSubscription.join(StrategyCatalog, UserSubscription.catalog_id)
-                .where(UserSubscription.is_armed == True, StrategyCatalog.is_active == True)
+                select(UserSubscription).join(
+                    StrategyCatalog,
+                    UserSubscription.catalog_id == StrategyCatalog.id,
+                ).where(
+                    UserSubscription.is_armed == True,
+                    StrategyCatalog.is_active == True,
+                )
             )
-            armed_subs = result.all()
+            armed_subs = result.scalars().all()
 
         if not armed_subs:
             return
@@ -240,8 +246,19 @@ class ExecutionEngine:
         from layers.state.models import StrategyInstance, StrategyCatalog
         from sqlalchemy import select
 
+        # sub is a UserSubscription; its catalog is joined in the query
+        cat = sub  # The sub already has catalog data via the join
+        # Actually, sub is a UserSubscription row. We need the StrategyCatalog.
+        # Let me re-query the catalog separately since the join returns UserSubscription objects.
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(StrategyCatalog).where(StrategyCatalog.id == sub.catalog_id)
+            )
+            cat = result.scalar_one_or_none()
+            if not cat:
+                return
+
         uid = sub.user_id
-        cat = sub.catalog
 
         # Load or create the strategy instance
         instance_id = f"{uid.hex[:8]}_{cat.id}"
