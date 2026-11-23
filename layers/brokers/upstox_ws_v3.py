@@ -93,6 +93,13 @@ class UpstoxWSV3:
         self._feeder = self._streamer.feeder
         self._keys = list(instrument_keys)
         self._mode = mode
+        # The feed endpoint (wss://api.upstox.com/v3/feed/market-data-feed)
+        # answers the WS handshake with a 302 redirect to the *authorized*
+        # feed URL (wss://wsfeeder-api.upstox.com/...). websocket-client's
+        # run_forever does NOT follow WebSocket redirects, so without this
+        # patch every connect gets "Handshake status 403 Forbidden". We patch
+        # the SDK's connect() to follow the 302 exactly once.
+        self._patch_feed_redirect(self._streamer)
 
         # Register callbacks that bridge into the async queue
         self._streamer.on("open", lambda: self._on_open())
@@ -278,6 +285,105 @@ class UpstoxWSV3:
         self._last_tick_ts = 0.0
         # Rebuild the streamer + socket from scratch.
         await self.start(list(keys), m)
+
+    # ------------------------------------------------------------------
+    # Feed 302-redirect handling
+    # ------------------------------------------------------------------
+    def _patch_feed_redirect(self, streamer) -> None:
+        """Wrap the SDK's connect() to follow the feed's 302 redirect.
+
+        Upstox's v3 feed endpoint responds to the WS handshake with a 302
+        redirect to the authorized feed URL. websocket-client's run_forever
+        does not follow WebSocket redirects (it only follows them in
+        connect()), so the naive SDK connect gets "403 Forbidden" on the
+        redirected host. We perform the redirect handshake ourselves (one
+        attempt) and hand off the resolved URL to a fresh WebSocketApp that
+        reuses the SDK's callbacks.
+
+        This mirrors what the Upstox docs instruct: 'configure your
+        WebSocket client to handle automatic redirection to the authorized
+        endpoint after authentication'.
+        """
+        import re
+        import ssl
+        import socket as _socket
+        import threading
+        import websocket as _ws
+
+        # Cache the resolved feed URL per-streamer so reconnects reuse it.
+        resolved_url: dict[str, str] = {}
+
+        def _resolve(url: str, headers: Dict[str, str]) -> str:
+            """Handshake to `url`; if the server 3xx-redirects, follow once."""
+            m = re.match(r"ws(s?)://([^/]+)(/.*)", url)
+            if not m:
+                return url
+            scheme, host, path = m.group(1), m.group(2), m.group(3)
+            import base64, os as _os
+            sec_key = base64.b64encode(_os.urandom(16)).decode()
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.settimeout(15)
+            try:
+                sock.connect((host, 443 if scheme == "s" else 80))
+                if scheme == "s":
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    sock = ctx.wrap_socket(sock, server_hostname=host)
+                req = (
+                    f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
+                    f"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {sec_key}\r\n"
+                    f"Sec-WebSocket-Version: 13\r\n"
+                )
+                for hk, hv in headers.items():
+                    req += f"{hk}: {hv}\r\n"
+                req += "\r\n"
+                sock.sendall(req.encode())
+                resp = sock.recv(4096).decode(errors="replace")
+                status_line = resp.splitlines()[0] if resp else ""
+                parts = status_line.split()
+                code = parts[1] if len(parts) > 1 else "0"
+                if code in ("301", "302", "307", "308"):
+                    loc = re.search(r"(?i)location:\s*(\S+)", resp)
+                    if loc:
+                        log.info("Upstox v3 WS following feed redirect",
+                                 target=loc.group(1)[:80])
+                        sock.close()
+                        return loc.group(1)
+                # 101 or any non-redirect: close and use the original url.
+                sock.close()
+                return url
+            except Exception as e:  # noqa: BLE001
+                sock.close()
+                log.warning("Upstox v3 WS redirect resolve failed — using direct URL",
+                            error=str(e))
+                return url
+
+        def _connect_patched(self):
+            feeder = self.feeder
+            ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
+            auth = self.api_client.configuration.auth_settings().get("OAUTH2", {}).get("value", "")
+            headers = {"Authorization": auth, "Accept": "*/*"}
+            target = resolved_url.get("url")
+            if not target:
+                target = _resolve(ws_url, headers)
+                resolved_url["url"] = target
+            if feeder.ws and feeder.ws.sock:
+                return
+            sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
+            feeder.ws = _ws.WebSocketApp(
+                target,
+                header=headers,
+                on_open=self.on_open,
+                on_message=self.on_message,
+                on_error=self.on_error,
+                on_close=self.on_close,
+            )
+            threading.Thread(target=feeder.ws.run_forever, kwargs={"sslopt": sslopt}).start()
+
+        streamer.connect = _connect_patched.__get__(streamer, type(streamer))
+        log.debug("Upstox v3 WS feed redirect patch applied")
 
     # ------------------------------------------------------------------
     # Internal callbacks (called from WS thread, must be thread-safe)
