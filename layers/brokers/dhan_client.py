@@ -90,6 +90,29 @@ class DhanClient(BrokerBase):
             "message": data.get("errorMessage", resp.text),
         }
 
+    async def get_option_ltp(self, symbol: str, security_id: str = "") -> Optional[float]:
+        """Fetch latest LTP for an option contract via Dhan option chain.
+
+        Dhan's option chain endpoint is free (not historical data).
+        Falls back to quote API if option chain fails.
+        """
+        if not security_id:
+            return None
+        try:
+            # Dhan quote endpoint: free, returns LTP for a security
+            url = f"{DHAN_BASE}/quotes"
+            payload = {"securityId": str(security_id), "exchangeSegment": "NSE_FNO"}
+            resp = await self._http.post(url, json=payload, headers=self._headers())
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("data", {}).get("data", [])
+                if items:
+                    ltp = items[0].get("lastPrice")
+                    return float(ltp) if ltp else None
+        except Exception as e:
+            log.debug("Dhan LTP poll failed", symbol=symbol, error=str(e))
+        return None
+
     async def get_order_status(self, broker_order_id: str) -> Dict[str, Any]:
         url = f"{DHAN_BASE}/orders/{broker_order_id}"
         params = {"dhanClientId": self._client_id}

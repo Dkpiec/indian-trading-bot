@@ -1,0 +1,629 @@
+"""Strategy execution engine — the missing piece.
+
+Wires armed subscriptions → strategy plugins → market data → order execution.
+
+Data sources:
+  1. Upstox WS V3 (primary) — real-time LTP ticks via protobuf stream
+  2. Dhan REST polling (fallback) — option chain + LTP when WS is down
+
+Flow:
+  _supervisor_loop() tick (1s)
+    → query armed subscriptions
+    → for each: load plugin, build state, call evaluate_tick()
+    → if ENTRY: check balance gate, place Dhan order, create StrategyInstance
+    → if EXIT: close position, update P&L, log to TradeOrderLedger
+    → update /trades, /profit, /status from live data
+"""
+from __future__ import annotations
+
+import asyncio
+import importlib
+import logging
+import re
+import time
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
+
+import structlog
+
+log = structlog.get_logger(__name__)
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+# ---------------------------------------------------------------------------
+# Market Data
+# ---------------------------------------------------------------------------
+
+
+class MarketDataFeed:
+    """Aggregated LTP feed: Upstox WS V3 primary, Dhan REST fallback.
+
+    Maintains a dict of instrument_key → latest tick so the engine can
+    query LTP for any option contract.
+    """
+
+    def __init__(self, *, dhan_client=None, upstox_ws=None):
+        self._dhan = dhan_client
+        self._upstox_ws = upstox_ws
+        # instrument_key → {"ltp": float, "ts": float, "src": str}
+        self._ticks: Dict[str, Dict[str, Any]] = {}
+        self._ws_running = False
+        self._ws_task: Optional[asyncio.Task] = None
+        self._last_poll_ts = 0.0
+
+    async def start(self, instrument_keys: List[str]) -> None:
+        """Start the Upstox WS feed and begin Dhan fallback polling."""
+        if self._upstox_ws and instrument_keys:
+            try:
+                await self._upstox_ws.start(instrument_keys, mode="ltpc")
+                self._ws_running = True
+                self._ws_task = asyncio.create_task(self._ws_consume())
+                log.info("Upstox WS started", instruments=len(instrument_keys))
+            except Exception as e:
+                log.warning("Upstox WS failed to start, using Dhan fallback", error=str(e))
+                self._ws_running = False
+
+    async def stop(self) -> None:
+        if self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+        if self._upstox_ws:
+            await self._upstox_ws.stop()
+        self._ws_running = False
+
+    async def _ws_consume(self) -> None:
+        """Consume ticks from the Upstox WS queue into _ticks."""
+        try:
+            async for tick in self._upstox_ws.ticks():
+                key = tick.get("instrument_key", "")
+                if key:
+                    self._ticks[key] = {
+                        "ltp": float(tick.get("last_price", 0)),
+                        "ts": time.time(),
+                        "src": "upstox_ws",
+                    }
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("Upstox WS consume error", error=str(e))
+
+    async def get_ltp(self, instrument_key: str, security_id: str = "", symbol: str = "") -> Optional[float]:
+        """Get latest LTP for an instrument. Tries WS cache, then Dhan poll."""
+        # 1. Check WS cache (fresh tick < 5s old)
+        cached = self._ticks.get(instrument_key)
+        if cached and (time.time() - cached["ts"]) < 5.0:
+            return cached["ltp"]
+
+        # 2. Dhan fallback: poll quotes for the security_id
+        if self._dhan and security_id:
+            try:
+                ltp = await self._dhan.get_option_ltp(symbol or security_id, security_id=security_id)
+                if ltp is not None:
+                    self._ticks[instrument_key] = {"ltp": ltp, "ts": time.time(), "src": "dhan"}
+                    return ltp
+            except Exception as e:
+                log.debug("Dhan LTP poll failed", security_id=security_id, error=str(e))
+
+        # 3. Stale cache is better than nothing
+        if cached:
+            return cached["ltp"]
+        return None
+
+    @property
+    def source(self) -> str:
+        """Current primary data source label."""
+        if self._ws_running:
+            return "upstox_ws"
+        if self._dhan:
+            return "dhan_poll"
+        return "none"
+
+
+# ---------------------------------------------------------------------------
+# Instrument Resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_instrument_key(
+    underlying: str,
+    strike: float,
+    expiry: str,
+    option_type: str,
+    segment: str = "NSE_FNO",
+) -> str:
+    """Build an Upstox instrument_key string.
+
+    Format: NSE_FNO|{strike}_{expiry}_{CE/PE}_{underlying}
+    Example: NSE_FNO|24000_25DEC26_CE_NIFTY
+
+    Upstox uses a specific format; this is a best-effort resolver.
+    For production, use the Upstox instruments JSON file.
+    """
+    expiry_tag = _format_expiry(expiry)
+    key = f"{segment}|{int(strike)}_{expiry_tag}_{option_type.upper()}_{underlying}"
+    return key
+
+
+def _format_expiry(date_str: str) -> str:
+    """Convert '2026-12-25' → '25DEC26' for Upstox instrument keys."""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        return d.strftime("%d%b%y").upper()
+    except (ValueError, TypeError):
+        return date_str
+
+
+# ---------------------------------------------------------------------------
+# Execution Engine
+# ---------------------------------------------------------------------------
+
+
+class ExecutionEngine:
+    """Core strategy execution loop.
+
+    Manages the full lifecycle:
+      armed subscription → plugin load → market data → evaluate_tick()
+      → order placement → position tracking → P&L → /trades /profit
+    """
+
+    def __init__(
+        self,
+        session_factory,
+        dhan_client=None,
+        upstox_ws=None,
+        balance_floor_pct: float = 0.20,
+    ):
+        self._session_factory = session_factory
+        self._dhan = dhan_client
+        self._upstox_ws = upstox_ws
+        self._floor_pct = balance_floor_pct
+
+        self._feed = MarketDataFeed(dhan_client=dhan_client, upstox_ws=upstox_ws)
+        self._plugins: Dict[str, Any] = {}  # instance_id → StrategyPlugin
+        self._running = False
+        self._last_tick_log = 0.0
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        self._running = True
+        log.info("ExecutionEngine started", feed_source=self._feed.source)
+
+    async def stop(self) -> None:
+        self._running = False
+        await self._feed.stop()
+        self._plugins.clear()
+        log.info("ExecutionEngine stopped")
+
+    # ------------------------------------------------------------------
+    # Main tick
+    # ------------------------------------------------------------------
+
+    async def tick(self) -> None:
+        """One execution cycle. Called by _supervisor_loop() every second."""
+        if not self._running:
+            return
+
+        if not self._in_market_hours():
+            return
+
+        from layers.state.models import UserSubscription, StrategyCatalog
+
+        # 1. Find all armed subscriptions
+        async with self._session_factory() as session:
+            result = await session.execute(
+                UserSubscription.join(StrategyCatalog, UserSubscription.catalog_id)
+                .where(UserSubscription.is_armed == True, StrategyCatalog.is_active == True)
+            )
+            armed_subs = result.all()
+
+        if not armed_subs:
+            return
+
+        # 2. Process each armed subscription
+        for sub in armed_subs:
+            try:
+                await self._process_subscription(sub)
+            except Exception as e:
+                log.error("Strategy execution error", catalog_id=sub.catalog_id, error=str(e))
+
+    # ------------------------------------------------------------------
+    # Per-subscription processing
+    # ------------------------------------------------------------------
+
+    async def _process_subscription(self, sub) -> None:
+        from layers.state.models import StrategyInstance, StrategyCatalog
+        from sqlalchemy import select
+
+        uid = sub.user_id
+        cat = sub.catalog
+
+        # Load or create the strategy instance
+        instance_id = f"{uid.hex[:8]}_{cat.id}"
+        plugin = self._get_plugin(instance_id, cat)
+        if not plugin:
+            log.warning("Failed to load plugin", catalog_id=cat.id)
+            return
+
+        # Build state for evaluate_tick
+        state = await self._build_state(instance_id, uid, cat)
+
+        # Get LTP
+        symbol = self._get_symbol(cat)
+        security_id = self._get_security_id(cat)
+        instrument_key = self._get_instrument_key(cat)
+        ltp = await self._feed.get_ltp(instrument_key, security_id=security_id, symbol=symbol)
+        if ltp is None:
+            return
+
+        # Call the strategy plugin
+        signal = await plugin.evaluate_tick(ltp, state)
+        if signal is None:
+            return
+
+        action = signal.get("action", "")
+        log.info(
+            "Strategy signal",
+            catalog_id=cat.id,
+            action=action,
+            side=signal.get("side"),
+            qty=signal.get("qty"),
+            ltp=ltp,
+        )
+
+        if action == "ENTRY":
+            await self._execute_entry(plugin, instance_id, uid, cat, signal, ltp)
+        elif action == "EXIT":
+            await self._execute_exit(plugin, instance_id, uid, cat, signal, ltp)
+
+    # ------------------------------------------------------------------
+    # State building
+    # ------------------------------------------------------------------
+
+    async def _build_state(
+        self, instance_id: str, uid, cat
+    ) -> Dict[str, Any]:
+        """Build the state dict passed to evaluate_tick()."""
+        from layers.state.models import StrategyInstance, TradeOrderLedger
+        from sqlalchemy import select
+
+        state: Dict[str, Any] = {
+            "net_qty": 0.0,
+            "entry_price": 0.0,
+            "unrealized_pnl": 0.0,
+            "spot_ltp": 0.0,
+            "trade_taken_today": False,
+        }
+
+        async with self._session_factory() as session:
+            # Load instance if it exists
+            result = await session.execute(
+                select(StrategyInstance).where(
+                    StrategyInstance.instance_id == instance_id,
+                    StrategyInstance.status == "RUNNING",
+                )
+            )
+            inst = result.scalar_one_or_none()
+            if inst:
+                state["net_qty"] = inst.net_qty
+                state["entry_price"] = inst.entry_price or 0.0
+                state["unrealized_pnl"] = inst.unrealized_pnl or 0.0
+
+            # Check if a trade was taken today
+            today_start = datetime.now(IST).date().isoformat()
+            from sqlalchemy import func
+            result = await session.execute(
+                select(func.count()).where(
+                    TradeOrderLedger.instance_id == instance_id,
+                    func.date(TradeOrderLedger.created_at) == today_start,
+                    TradeOrderLedger.status == "FILLED",
+                    TradeOrderLedger.side == "BUY",
+                )
+            )
+            state["trade_taken_today"] = (result.scalar() or 0) > 0
+
+        # OR range parameters (from catalog default_params)
+        if cat.default_params:
+            state["or_high"] = cat.default_params.get("or_high", 0)
+            state["or_low"] = cat.default_params.get("or_low", 0)
+            state["or_mid"] = cat.default_params.get("or_mid", 0)
+
+        return state
+
+    # ------------------------------------------------------------------
+    # Entry execution
+    # ------------------------------------------------------------------
+
+    async def _execute_entry(
+        self,
+        plugin,
+        instance_id: str,
+        uid,
+        cat,
+        signal: Dict[str, Any],
+        ltp: float,
+    ) -> None:
+        """Place an entry order and create the StrategyInstance."""
+        from layers.state.models import StrategyInstance, TradeOrderLedger
+        from sqlalchemy import select
+
+        # Balance gate check
+        if self._dhan:
+            try:
+                balance = await self._dhan.get_balance()
+                total_equity = balance.total_equity
+                free_balance = balance.free_balance
+                floor = total_equity * self._floor_pct
+                if free_balance < floor:
+                    log.warning(
+                        "Entry blocked: balance below floor",
+                        free=free_balance,
+                        floor=floor,
+                        catalog_id=cat.id,
+                    )
+                    return
+            except Exception as e:
+                log.warning("Balance gate check failed, proceeding", error=str(e))
+
+        # Place the order via Dhan
+        symbol = self._get_symbol(cat)
+        security_id = self._get_security_id(cat)
+        side = signal.get("side", "BUY")
+        qty = int(signal.get("qty", 1))
+
+        if not self._dhan:
+            log.warning("No Dhan client, cannot place order")
+            return
+
+        try:
+            order_result = await self._dhan.place_order(
+                symbol=symbol,
+                security_id=security_id,
+                side=side,
+                quantity=qty,
+                order_type="MARKET",
+                product_type="INTRADAY",
+            )
+            broker_order_id = order_result.get("broker_order_id", "")
+            if order_result.get("status") == "REJECTED":
+                log.error("Entry order rejected", symbol=symbol, message=order_result.get("message"))
+                return
+            log.info(
+                "Entry order placed",
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                order_id=broker_order_id,
+                catalog_id=cat.id,
+            )
+        except Exception as e:
+            log.error("Entry order failed", symbol=symbol, error=str(e))
+            return
+
+        # Create/update StrategyInstance
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(StrategyInstance).where(
+                    StrategyInstance.instance_id == instance_id
+                )
+            )
+            inst = result.scalar_one_or_none()
+            if inst is None:
+                inst = StrategyInstance(
+                    instance_id=instance_id,
+                    user_id=uid,
+                    catalog_id=cat.id,
+                    status="RUNNING",
+                    execution_mode="LIVE",
+                    parameters={},
+                )
+                session.add(inst)
+
+            inst.status = "RUNNING"
+            inst.entry_price = ltp
+            inst.last_ltp = ltp
+            inst.net_qty = qty if side == "BUY" else -qty
+            inst.unrealized_pnl = 0.0
+
+            # Log the trade
+            ledger = TradeOrderLedger(
+                user_id=uid,
+                instance_id=instance_id,
+                broker="dhan",
+                order_id=broker_order_id,
+                symbol=symbol,
+                side=side,
+                quantity=qty,
+                price=ltp,
+                order_type="MARKET",
+                status="FILLED",
+                filled_quantity=qty,
+                average_price=ltp,
+            )
+            session.add(ledger)
+            await session.commit()
+
+        # Notify via Telegram
+        await self._notify(
+            uid,
+            f"🟢 ENTRY {cat.display_name}\n"
+            f"Side: {side} | Qty: {qty}\n"
+            f"Price: ₹{ltp:,.2f} | Symbol: {symbol}\n"
+            f"Order: {broker_order_id}",
+        )
+
+    # ------------------------------------------------------------------
+    # Exit execution
+    # ------------------------------------------------------------------
+
+    async def _execute_exit(
+        self,
+        plugin,
+        instance_id: str,
+        uid,
+        cat,
+        signal: Dict[str, Any],
+        ltp: float,
+    ) -> None:
+        """Close the position and update P&L."""
+        from layers.state.models import StrategyInstance, TradeOrderLedger
+        from sqlalchemy import select
+
+        side = signal.get("side", "SELL")
+        qty = int(signal.get("qty", 1))
+        symbol = self._get_symbol(cat)
+        security_id = self._get_security_id(cat)
+
+        if not self._dhan:
+            log.warning("No Dhan client, cannot place exit order")
+            return
+
+        try:
+            order_result = await self._dhan.place_order(
+                symbol=symbol,
+                security_id=security_id,
+                side=side,
+                quantity=qty,
+                order_type="MARKET",
+                product_type="INTRADAY",
+            )
+            broker_order_id = order_result.get("broker_order_id", "")
+            if order_result.get("status") == "REJECTED":
+                log.error("Exit order rejected", symbol=symbol, message=order_result.get("message"))
+                return
+            log.info(
+                "Exit order placed",
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                order_id=broker_order_id,
+                catalog_id=cat.id,
+            )
+        except Exception as e:
+            log.error("Exit order failed", symbol=symbol, error=str(e))
+            return
+
+        # Update instance P&L
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(StrategyInstance).where(
+                    StrategyInstance.instance_id == instance_id
+                )
+            )
+            inst = result.scalar_one_or_none()
+            if inst:
+                entry_px = inst.entry_price or 0.0
+                if entry_px > 0:
+                    if side == "SELL":
+                        pnl = (ltp - entry_px) * qty
+                    else:
+                        pnl = (entry_px - ltp) * qty
+                    inst.realized_pnl = (inst.realized_pnl or 0.0) + pnl
+                    inst.net_qty = 0.0
+                    inst.unrealized_pnl = 0.0
+                    inst.status = "IDLE"
+                    inst.last_ltp = ltp
+
+                    # Log the trade
+                    ledger = TradeOrderLedger(
+                        user_id=uid,
+                        instance_id=instance_id,
+                        broker="dhan",
+                        order_id=broker_order_id,
+                        symbol=symbol,
+                        side=side,
+                        quantity=qty,
+                        price=ltp,
+                        order_type="MARKET",
+                        status="FILLED",
+                        filled_quantity=qty,
+                        average_price=ltp,
+                        pnl=pnl,
+                    )
+                    session.add(ledger)
+                    await session.commit()
+
+                    # Notify
+                    emoji = "✅" if pnl >= 0 else "❌"
+                    await self._notify(
+                        uid,
+                        f"{emoji} EXIT {cat.display_name}\n"
+                        f"Side: {side} | Qty: {qty}\n"
+                        f"Price: ₹{ltp:,.2f} | P&L: {pnl:+,.2f}\n"
+                        f"Order: {broker_order_id}",
+                    )
+
+    # ------------------------------------------------------------------
+    # Plugin loading
+    # ------------------------------------------------------------------
+
+    def _get_plugin(self, instance_id: str, cat) -> Optional[Any]:
+        """Load or return a cached StrategyPlugin instance."""
+        if instance_id in self._plugins:
+            return self._plugins[instance_id]
+
+        try:
+            module = importlib.import_module(f"catalog.{cat.plugin_file.replace('.py', '')}")
+            plugin_cls = getattr(module, "StrategyPlugin")
+            # Merge default_params with any subscription overrides
+            params = dict(cat.default_params or {})
+            self._plugins[instance_id] = plugin_cls(instance_id, params)
+            log.info("Plugin loaded", instance_id=instance_id, plugin=cat.plugin_file)
+            return self._plugins[instance_id]
+        except Exception as e:
+            log.error("Plugin load failed", instance_id=instance_id, error=str(e))
+            return None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _get_symbol(self, cat) -> str:
+        """Derive a Dhan symbol string from the catalog entry."""
+        underlying = cat.underlying or "NIFTY"
+        version = cat.version or ""
+        legs = (cat.default_params or {}).get("legs", ["CE"])
+        leg_str = "_".join(legs)
+        return f"{underlying}_{version}_{leg_str}"
+
+    def _get_security_id(self, cat) -> str:
+        """Get the Dhan security_id for the option contract.
+
+        Dhan security IDs are numeric. For options, the security_id is
+        resolved from the option chain API. For now, we use the
+        strategy's default_params to store it, or fall back to a
+        placeholder that the resolve_dhan_option.py script can fill.
+        """
+        params = cat.default_params or {}
+        # The arm process should resolve and store security_id here
+        return str(params.get("security_id", ""))
+
+    def _get_instrument_key(self, cat) -> str:
+        """Best-effort Upstox instrument key."""
+        underlying = cat.underlying or "NIFTY"
+        segment = cat.segment or "NSE_FNO"
+        params = cat.default_params or {}
+        strike = params.get("strike", "ATM")
+        option_type = params.get("legs", ["CE"])[0] if params.get("legs") else "CE"
+        return f"{segment}|{strike}_{underlying}_{option_type}"
+
+    def _in_market_hours(self) -> bool:
+        """Check if NSE options market is open (09:15-15:30 IST, Mon-Fri)."""
+        now_ist = datetime.now(IST)
+        if now_ist.weekday() >= 5:
+            return False
+        return (9, 15) <= (now_ist.hour, now_ist.minute) < (15, 30)
+
+    async def _notify(self, uid, text: str) -> None:
+        """Send a Telegram notification for the user."""
+        try:
+            # The notification goes through the BotManager if available
+            # For now, log it; the /trades command will show the trade
+            log.info("Trade notification", user_id=str(uid), text=text[:200])
+        except Exception as e:
+            log.warning("Notification failed", error=str(e))

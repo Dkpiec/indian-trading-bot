@@ -280,10 +280,21 @@ async def lifespan(app: FastAPI):
         log.warning("TRADING_TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — bot disabled")
 
     # ------------------------------------------------------------------
-    # Strategy supervisor loop (background task)
+    # Strategy execution engine + supervisor loop
     # ------------------------------------------------------------------
-    app.state.supervisor_task = asyncio.create_task(_supervisor_loop())
-    log.info("Strategy supervisor started")
+    from layers.strategies.engine import ExecutionEngine
+
+    engine = ExecutionEngine(
+        session_factory=async_session_factory,
+        dhan_client=dhan_client,
+        upstox_ws=upstox_ws,
+        balance_floor_pct=settings.balance_floor_pct,
+    )
+    app.state.execution_engine = engine
+    await engine.start()
+
+    app.state.supervisor_task = asyncio.create_task(_supervisor_loop(engine))
+    log.info("Strategy supervisor started", engine_source=engine._feed.source)
 
     yield
 
@@ -293,6 +304,13 @@ async def lifespan(app: FastAPI):
         await app.state.supervisor_task
     except asyncio.CancelledError:
         pass
+
+    # Stop execution engine
+    if hasattr(app.state, "execution_engine"):
+        try:
+            await app.state.execution_engine.stop()
+        except Exception as e:
+            log.warning("Execution engine shutdown error", error=str(e))
 
     # Stop Telegram bot
     if bot_manager:
@@ -444,19 +462,28 @@ app = create_app()
 # Strategy Supervisor Loop (runs all armed user strategies concurrently)
 # ---------------------------------------------------------------------------
 
-async def _supervisor_loop():
-    """Main loop: evaluates all armed strategy instances every tick.
+async def _supervisor_loop(engine=None):
+    """Main loop: delegates to the execution engine every second.
 
-    Each user's armed strategies run as independent asyncio tasks within
-    a per-user TaskGroup. Balance gate (20% floor) is checked before each
-    entry evaluation.
+    The engine handles:
+      - querying armed subscriptions
+      - fetching market data (Upstox WS / Dhan fallback)
+      - calling evaluate_tick() on strategy plugins
+      - placing Dhan orders
+      - updating StrategyInstance / TradeOrderLedger rows
     """
-    log.info("Supervisor loop initialized")
+    if engine is None:
+        # Fallback: no engine (DB unavailable at startup)
+        log.info("Supervisor loop running without engine (degraded)")
+        while True:
+            await asyncio.sleep(30.0)
+            return
+
+    log.info("Supervisor loop started", feed=engine._feed.source)
     while True:
         try:
-            await asyncio.sleep(1.0)  # 1s tick rate
-            # TODO: Phase 3 implementation — iterate armed instances,
-            # check balance floor, evaluate entries/exits
+            await asyncio.sleep(1.0)
+            await engine.tick()
         except asyncio.CancelledError:
             raise
         except Exception as e:
