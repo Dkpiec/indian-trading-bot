@@ -11,6 +11,7 @@ Auth: Bearer token via api_client.configuration.auth_settings()['OAUTH2']['value
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -386,6 +387,38 @@ class UpstoxWSV3:
                             error=str(e))
                 return url
 
+        def _resolve_via_authorize(auth: str) -> Optional[str]:
+            """Call GET /v3/feed/market-data-feed/authorize to get the
+            authorized wss:// URL directly (no redirect race).
+
+            The authorize endpoint returns:
+                {"status":"success","data":{"authorized_redirect_uri":"wss://..."}}
+
+            The code in the query string is single-use, so this must be
+            called fresh on every connect(). Returns None on failure.
+            """
+            import urllib.request
+            url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
+            req = urllib.request.Request(
+                url,
+                headers={"Authorization": auth, "Accept": "application/json"},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = json.loads(resp.read())
+                    uri = (body.get("data") or {}).get("authorized_redirect_uri")
+                    if uri:
+                        log.info("Upstox v3 WS authorize endpoint returned feed URL",
+                                 target=uri[:80])
+                        return uri
+                log.warning("Upstox v3 WS authorize endpoint returned no URI",
+                            body=body)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Upstox v3 WS authorize endpoint failed",
+                            error=str(e))
+            return None
+
         def _connect_patched(self):
             feeder = self.feeder
             if feeder is None:
@@ -405,18 +438,22 @@ class UpstoxWSV3:
             if not feeder:
                 log.error("Upstox WS feeder unavailable — cannot start feed")
                 return
-            ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
             auth = self.api_client.configuration.auth_settings().get("OAUTH2", {}).get("value", "")
-            headers = {"Authorization": auth, "Accept": "*/*"}
-            # Always re-resolve the redirect target on every connect().
-            # The 302 target from api.upstox.com carries a session-qualified
-            # URL on wsfeeder-api.upstox.com that can go stale (401/403).
-            # Re-resolving is one cheap HTTP request and guarantees a fresh
-            # session token, so reconnects never hit a stale URL.
-            target = _resolve(ws_url, headers, force=True)
+            # Primary: call the /authorize REST endpoint for a fresh single-use
+            # wss:// URL. This avoids the 302-redirect race that causes 403s
+            # when stale session tokens are reused across reconnects.
+            target = _resolve_via_authorize(auth)
+            if not target:
+                # Fallback: follow the 302 redirect from the feed endpoint.
+                log.warning("Upstox v3 WS authorize endpoint unavailable — "
+                            "falling back to 302 redirect")
+                ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
+                headers = {"Authorization": auth, "Accept": "*/*"}
+                target = _resolve(ws_url, headers, force=True)
             resolved_url["url"] = target
             if feeder.ws and feeder.ws.sock:
                 return
+            headers = {"Authorization": auth, "Accept": "*/*"}
             sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
             feeder.ws = _ws.WebSocketApp(
                 target,
