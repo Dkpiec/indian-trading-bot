@@ -469,24 +469,17 @@ class UpstoxWSV3:
                 return
             headers = {"Authorization": auth, "Accept": "*/*"}
             sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
-            # Primary: /authorize endpoint (browser UA to bypass Cloudflare
-            # 1010). Returns the wss:// URL directly — no 302 redirect race,
-            # no TLS session break, no Cloudflare block.
-            target = _resolve_via_authorize(auth)
-            if target:
-                log.info("Upstox v3 WS connecting via /authorize URL",
-                         target=target[:80])
-            else:
-                # Fallback: native websocket-client redirect follow.
-                # Per Upstox docs: "configure your WebSocket client to handle
-                # automatic redirection to the authorized endpoint."
-                # websocket-client follows 301/302/303 in-session, but the
-                # cross-host ?r= token may 403 if the session breaks.
-                target = "wss://api.upstox.com/v3/feed/market-data-feed"
-                log.info("Upstox v3 WS connecting (native redirect follow)",
-                         target=target)
+            # Per the Upstox V3 docs and the SDK's own feeder.connect():
+            # connect to wss://api.upstox.com/v3/feed/market-data-feed and
+            # let websocket-client follow the 302 redirect to the authorized
+            # wsfeeder-api target IN-SESSION (redirect_limit default=3).
+            # This is exactly what the SDK does — no /authorize endpoint,
+            # no raw-socket _resolve, no TLS session break.
+            ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
+            log.info("Upstox v3 WS connecting (SDK-native redirect follow)",
+                     target=ws_url, instruments=len(self.instrumentKeys))
             feeder.ws = _ws.WebSocketApp(
-                target,
+                ws_url,
                 header=headers,
                 on_open=feeder.on_open,
                 on_message=feeder.on_message,
@@ -495,8 +488,7 @@ class UpstoxWSV3:
             )
             threading.Thread(
                 target=feeder.ws.run_forever,
-                kwargs={"sslopt": sslopt, "enable_multithread": False,
-                        "max_size": 0},
+                kwargs={"sslopt": sslopt},
             ).start()
 
         streamer.connect = _connect_patched.__get__(streamer, type(streamer))
