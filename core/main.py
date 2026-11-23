@@ -396,7 +396,9 @@ def create_app() -> FastAPI:
     # Status endpoint (was missing)
     @app.get("/api/v1/status")
     async def get_status():
-        """Get bot status: database, redis, broker clients, active strategies."""
+        """Get bot status: database, redis, broker clients, active strategies,
+        and Upstox WS V3 feed liveness (the signal behind the Telegram
+        'WS alive=' report)."""
         from core.main import _db_available as db_avail, _redis_pool as redis_p
         status = {
             "database": "connected" if db_avail else "unavailable",
@@ -406,6 +408,17 @@ def create_app() -> FastAPI:
             "active_strategies": 0,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        # Upstox WS V3 feed liveness — the real 'WS alive' signal.
+        ws = getattr(app.state, "upstox_ws", None)
+        if ws:
+            status["upstox_ws"] = {
+                "running": ws._running,
+                "healthy": bool(getattr(ws, "healthy", lambda: False)()),
+                "last_tick_age_s": round(time.time() - ws._last_tick_ts, 1) if ws._last_tick_ts else None,
+                "subscribed_instruments": len(getattr(ws, "_keys", []) or []),
+            }
+        else:
+            status["upstox_ws"] = {"running": False, "healthy": False, "reason": "no adapter (no token)"}
         # Count active strategy instances if DB available
         if db_avail:
             try:

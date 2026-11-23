@@ -36,6 +36,11 @@ class UpstoxWSV3:
         self._access_token = analytics_token or access_token
         self._queue: Optional[asyncio.Queue] = None
         self._streamer = None
+        self._feeder = None
+        self._keys: List[str] = []
+        self._mode = "ltpc"
+        self._last_tick_ts = 0.0
+        self._last_subscribed_ts = 0.0
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running = False
         self._first_tick_logged = False
@@ -85,6 +90,9 @@ class UpstoxWSV3:
             instrumentKeys=instrument_keys,
             mode=mode,
         )
+        self._feeder = self._streamer.feeder
+        self._keys = list(instrument_keys)
+        self._mode = mode
 
         # Register callbacks that bridge into the async queue
         self._streamer.on("open", lambda: self._on_open())
@@ -123,14 +131,51 @@ class UpstoxWSV3:
         # but if the socket wasn't ready at that moment the subscribe raises
         # "WebSocket is not open." and is silently swallowed by
         # websocket-client. This explicit call guarantees the keys are sent
-        # once the socket is confirmed open.
-        if instrument_keys and feeder and feeder.ws and feeder.ws.sock:
+        # once the socket is confirmed open. Retry a few times because the
+        # SDK's on_open can fire on a transient socket that immediately
+        # closes (the "socket is already closed" race we saw in production).
+        feeder = self._streamer.feeder
+        subscribed = False
+        for attempt in range(6):
+            if not (feeder and feeder.ws and feeder.ws.sock):
+                # Socket dropped (or never opened) — ask the SDK to reconnect
+                # and give it a moment to bring the socket back up.
+                try:
+                    self._streamer.connect()
+                except Exception as e:
+                    log.warning("Upstox v3 WS reconnect (pre-sub) error", error=str(e))
+                await asyncio.sleep(1.5)
+                feeder = self._streamer.feeder
+                continue
             try:
-                self._streamer.subscribe(list(instrument_keys), mode)
+                if self._keys:
+                    feeder.subscribe(list(self._keys), self._mode)
+                self._last_subscribed_ts = time.time()
                 log.info("Upstox v3 WS initial subscribe sent",
-                         count=len(instrument_keys))
+                         count=len(self._keys), attempt=attempt + 1)
+                subscribed = True
+                break
             except Exception as e:
-                log.error("Upstox v3 WS initial subscribe failed", error=str(e))
+                log.warning("Upstox v3 WS initial subscribe retry",
+                            attempt=attempt + 1, error=str(e))
+                await asyncio.sleep(1.0)
+        if not subscribed:
+            log.error("Upstox v3 WS subscribe could not be confirmed "
+                      "— the socket may flap; liveness check will drive a reconnect")
+        # Verify a live tick actually arrives within ~8s. "Socket open" is
+        # not enough: in production the socket flapped and the first
+        # subscribe raised "socket is already closed", so no data ever
+        # flowed. A tick is the only real proof the feed is usable.
+        if instrument_keys:
+            t0 = time.time()
+            while time.time() - t0 < 8.0:
+                if self._last_tick_ts and (time.time() - self._last_tick_ts) < 10.0:
+                    log.info("Upstox v3 WS tick verified", instruments=len(instrument_keys))
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                log.warning("Upstox v3 WS: no tick within 8s of start "
+                            "— feed may be live but silent, or socket flapping")
         # Final health check: if the socket still isn't open after the retry,
         # the WS is down. Log loudly so the Dhan fallback is a conscious
         # degradation, not a silent one.
@@ -188,6 +233,51 @@ class UpstoxWSV3:
     @property
     def connected(self) -> bool:
         return self._running and self._streamer is not None
+
+    def healthy(self) -> bool:
+        """True only when the WS is running AND has received a live tick in
+        the last 45s (the SENSEX/NIFTY option LTP refresh is far faster than
+        45s, so a stale _last_tick_ts means the socket flapped or the
+        subscription was lost). This is the liveness signal the engine and
+        the Telegram 'WS alive=' report should use, not just 'running'."""
+        if not self._running:
+            return False
+        if not self._last_tick_ts:
+            return False
+        return (time.time() - self._last_tick_ts) < 45.0
+
+    async def reconnect(self, instrument_keys: Optional[List[str]] = None,
+                        mode: Optional[str] = None) -> None:
+        """Tear down the streamer/feeder socket and start it again.
+
+        The SDK's auto_reconnect re-subscribes on close, but in production
+        the socket flapped and the re-subscribe raised 'socket is already
+        closed' and never recovered. Forcing a fresh streamer + socket is
+        the reliable path. Call this whenever healthy() is False and the
+        engine needs LTPs again.
+        """
+        keys = instrument_keys if instrument_keys is not None else self._keys
+        m = mode if mode is not None else self._mode
+        if not keys:
+            log.warning("Upstox WS reconnect skipped — no instrument keys")
+            return
+        # Stop the old streamer/feeder (closes the socket, cancels the WS
+        # thread's run_forever). We keep the _queue and _loop.
+        self._running = False
+        self._ws_open = False
+        try:
+            if self._streamer and self._streamer.feeder:
+                try:
+                    self._streamer.feeder.ws.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._streamer = None
+        self._feeder = None
+        self._last_tick_ts = 0.0
+        # Rebuild the streamer + socket from scratch.
+        await self.start(list(keys), m)
 
     # ------------------------------------------------------------------
     # Internal callbacks (called from WS thread, must be thread-safe)
@@ -251,6 +341,7 @@ class UpstoxWSV3:
                     "change_percent": float(ltpc.get("cp", 0) or 0),
                     "ts": time.time(),
                 }
+                self._last_tick_ts = time.time()
                 if not self._first_tick_logged:
                     self._first_tick_logged = True
                     log.info("First Upstox WS tick received",

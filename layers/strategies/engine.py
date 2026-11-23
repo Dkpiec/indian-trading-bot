@@ -52,6 +52,39 @@ class MarketDataFeed:
         self._ws_task: Optional[asyncio.Task] = None
         self._last_poll_ts = 0.0
         self._ws_subscribed: set = set()  # keys already subscribed to the WS
+        self._last_ws_reconnect_ts = 0.0
+        self._ws_unhealthy_ts = 0.0
+
+    async def _maybe_reconnect_ws(self) -> None:
+        """Drive a WS reconnect when the feed is running but has gone stale
+        (the 'socket is already closed' flap). Reconnect at most once every
+        60s and only if the socket was healthy recently, so we don't hammer
+        the endpoint on a persistent network outage."""
+        ws = self._upstox_ws
+        if not ws or not self._ws_running:
+            return
+        if getattr(ws, "healthy", None) and ws.healthy():
+            self._ws_unhealthy_ts = 0.0
+            return
+        # Feed is running but unhealthy. Wait 30s of continuous unhealthiness
+        # before reconnecting, and space reconnects by >= 60s.
+        now = time.time()
+        if not self._ws_unhealthy_ts:
+            self._ws_unhealthy_ts = now
+            return
+        if now - self._ws_unhealthy_ts < 30.0:
+            return
+        if now - self._last_ws_reconnect_ts < 60.0:
+            return
+        log.warning("Upstox WS stale (no ticks >= 45s) — reconnecting",
+                    last_tick_age=(now - getattr(ws, "_last_tick_ts", 0)) or "never")
+        self._last_ws_reconnect_ts = now
+        try:
+            await ws.reconnect(self._ws_subscribed or list(self._ws_subscribed))
+            self._ws_unhealthy_ts = 0.0
+            log.info("Upstox WS reconnect issued", instruments=len(self._ws_subscribed))
+        except Exception as e:
+            log.error("Upstox WS reconnect error", error=str(e))
 
     async def start(self, instrument_keys: List[str]) -> None:
         """Start the Upstox WS feed (or subscribe new keys if already running).
@@ -114,6 +147,7 @@ class MarketDataFeed:
                     log.warning("Upstox WS closed/error — falling back to Dhan",
                                 code=tick.get("code"), error=tick.get("error"))
                     self._ws_running = False
+                    self._ws_unhealthy_ts = 0.0
                     continue
                 key = tick.get("instrument_key", "")
                 ltp = tick.get("last_price")
@@ -381,6 +415,12 @@ class ExecutionEngine:
 
         if not armed_subs:
             return
+
+        # 1b. Drive WS liveness/reconnect: if the WS feed is running but the
+        #     socket flapped (the 'socket is already closed' race), force a
+        #     fresh streamer + socket so option LTPs flow again. This runs
+        #     every tick so a stale feed self-heals within ~60s.
+        await self._feed._maybe_reconnect_ws()
 
         # 2. Process each armed subscription
         for sub in armed_subs:
