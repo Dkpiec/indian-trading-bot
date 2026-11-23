@@ -303,7 +303,60 @@ def create_app() -> FastAPI:
             "status": "ok",
             "version": "4.0.0",
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "database": "connected" if _db_available else "unavailable",
+            "redis": "connected" if _redis_pool and _redis_pool is not False else "unavailable",
         }
+    
+    # Status endpoint (was missing)
+    @app.get("/api/v1/status")
+    async def get_status():
+        """Get bot status: database, redis, broker clients, active strategies."""
+        from core.main import _db_available as db_avail, _redis_pool as redis_p
+        status = {
+            "database": "connected" if db_avail else "unavailable",
+            "redis": "connected" if redis_p and redis_p is not False else "unavailable",
+            "dhan_client": bool(app.state.dhan_client) if hasattr(app.state, "dhan_client") else False,
+            "upstox_client": bool(app.state.upstox_client) if hasattr(app.state, "upstox_client") else False,
+            "active_strategies": 0,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        # Count active strategy instances if DB available
+        if db_avail:
+            try:
+                from sqlalchemy import select, func
+                from layers.state.models import StrategyInstance
+                async with async_session_factory() as session:
+                    result = await session.execute(
+                        select(func.count()).where(StrategyInstance.status == "RUNNING")
+                    )
+                    status["active_strategies"] = result.scalar() or 0
+            except Exception:
+                pass
+        return status
+    
+    # Balance endpoint (was missing)
+    @app.get("/api/v1/balance")
+    async def get_balance():
+        """Get balance from active broker client."""
+        if not hasattr(app.state, "dhan_client") or not app.state.dhan_client:
+            return {
+                "status": "unavailable",
+                "message": "No broker client initialized. Check DHAN_ACCESS_TOKEN env var.",
+            }
+        try:
+            balance = await app.state.dhan_client.get_balance()
+            return {
+                "status": "ok",
+                "total_equity": balance.total_equity,
+                "free_balance": balance.free_balance,
+                "used_margin": balance.used_margin,
+                "timestamp": balance.timestamp,
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e),
+            }
 
     # Register routers
     from rpc.auth import router as auth_router
