@@ -21,7 +21,7 @@ import importlib
 import logging
 import re
 import time
-from datetime import datetime, timezone, timedelta, date as Date
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -346,13 +346,17 @@ class ExecutionEngine:
                 state["entry_price"] = inst.entry_price or 0.0
                 state["unrealized_pnl"] = inst.unrealized_pnl or 0.0
 
-            # Check if a trade was taken today
+            # Check if a trade was taken today.
+            # Compare the TIMESTAMP column directly to a datetime — never CAST to
+            # date (the Date type collides with the DB column type name and breaks
+            # the query). The 00:00 start of day is the correct boundary in IST.
             from sqlalchemy import func as _func
-            today = datetime.now(IST).date()
+            from sqlalchemy.sql import func as _sqlfunc
+            today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
             result = await session.execute(
                 select(_func.count()).where(
                     TradeOrderLedger.instance_id == instance_id,
-                    TradeOrderLedger.created_at.cast(Date) == today,
+                    TradeOrderLedger.created_at >= today_start,
                     TradeOrderLedger.status == "FILLED",
                     TradeOrderLedger.side == "BUY",
                 )
