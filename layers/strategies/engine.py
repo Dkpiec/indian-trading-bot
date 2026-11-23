@@ -98,6 +98,13 @@ class MarketDataFeed:
                 log.info("WS feed disabled — all LTP via Dhan poll")
             return
         new_keys = [k for k in instrument_keys if k and k not in self._ws_subscribed]
+        # Also subscribe the index LTP keys so the WS is the primary source
+        # for BOTH option and index LTPs (the option auto-resolver reads
+        # index LTPs from this same feed).
+        index_keys = [
+            "NSE_INDEX|NIFTY", "BSE_INDEX|SENSEX", "NSE_INDEX|BANKNIFTY",
+        ]
+        new_keys.extend(k for k in index_keys if k not in self._ws_subscribed and k not in instrument_keys)
         if self._ws_running:
             if new_keys:
                 try:
@@ -109,15 +116,17 @@ class MarketDataFeed:
                     log.warning("Upstox WS subscribe failed", error=str(e))
             return
         # First start
-        if not instrument_keys:
+        all_keys = list(instrument_keys) + [k for k in index_keys if k not in instrument_keys]
+        if not all_keys:
             log.info("WS feed has no instrument keys — all LTP via Dhan poll")
             return
         try:
-            await self._upstox_ws.start(instrument_keys, mode="ltpc")
+            await self._upstox_ws.start(all_keys, mode="ltpc")
             self._ws_running = True
-            self._ws_subscribed.update(instrument_keys)
+            self._ws_subscribed.update(all_keys)
             self._ws_task = asyncio.create_task(self._ws_consume())
-            log.info("Upstox WS started", instruments=len(instrument_keys))
+            log.info("Upstox WS started", instruments=len(all_keys),
+                     sample=all_keys[:4])
         except Exception as e:
             log.warning("Upstox WS failed to start, using Dhan fallback", error=str(e))
             self._ws_running = False
@@ -138,8 +147,19 @@ class MarketDataFeed:
 
         Each tick is a dict shaped like:
             {type, instrument_key, last_price, change_percent, ts}
-        produced by UpstoxWSV3._on_message (FIX 6).
+        produced by UpstoxWSV3._on_message.
+
+        Index ticks (NSE_INDEX|NIFTY, BSE_INDEX|SENSEX, ...) are also
+        routed into _index_ltp_cache so the option auto-resolver has a
+        spot to compute strikes — this makes the WS the primary source
+        for BOTH option LTPs and index LTPs, as intended.
         """
+        # Map Upstox index instrument keys -> underlying code for the cache.
+        index_key_map = {
+            "NSE_INDEX|NIFTY": "NIFTY",
+            "BSE_INDEX|SENSEX": "SENSEX",
+            "NSE_INDEX|BANKNIFTY": "BANKNIFTY",
+        }
         try:
             async for tick in self._upstox_ws.ticks():
                 ttype = tick.get("type", "tick")
@@ -157,6 +177,11 @@ class MarketDataFeed:
                         "ts": tick.get("ts", time.time()),
                         "src": "upstox_ws",
                     }
+                    # Index tick → populate the index LTP cache for the
+                    # option auto-resolver (WS is now the primary index source).
+                    underlying_code = index_key_map.get(key)
+                    if underlying_code:
+                        _index_ltp_cache[underlying_code] = (float(ltp), time.time())
         except asyncio.CancelledError:
             raise
         except Exception as e:
