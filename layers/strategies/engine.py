@@ -21,7 +21,7 @@ import importlib
 import logging
 import re
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as Date
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -337,7 +337,7 @@ class ExecutionEngine:
             result = await session.execute(
                 select(func.count()).where(
                     TradeOrderLedger.instance_id == instance_id,
-                    func.date(TradeOrderLedger.created_at) == today_start,
+                    func.date(TradeOrderLedger.created_at.cast(Date)) == today_start,
                     TradeOrderLedger.status == "FILLED",
                     TradeOrderLedger.side == "BUY",
                 )
@@ -579,21 +579,41 @@ class ExecutionEngine:
     # Plugin loading
     # ------------------------------------------------------------------
 
+    # Maps catalog strategy IDs to their actual plugin file in catalog/
+    _PLUGIN_MAP = {
+        "NIFTY101": "orb_invalidation_strategy_v6e",
+        "NIFTY102": "nifty_slhunt_reversal",
+        "BANKNIFTY101": "orb_invalidation_strategy_v2",
+        "SENSEX101": "orb_invalidation_strategy_v2",
+        "SENSEX102": "sensex_slhunt_reversal",
+    }
+
     def _get_plugin(self, instance_id: str, cat) -> Optional[Any]:
         """Load or return a cached StrategyPlugin instance."""
         if instance_id in self._plugins:
             return self._plugins[instance_id]
 
+        # Resolve the plugin module: use _PLUGIN_MAP, fall back to plugin_file column
+        module_name = self._PLUGIN_MAP.get(cat.id)
+        if not module_name:
+            # Fall back to the DB column value (strip .py if present)
+            pf = (cat.plugin_file or "").replace(".py", "")
+            module_name = pf if pf else None
+
+        if not module_name:
+            log.warning("No plugin mapping for catalog entry", catalog_id=cat.id)
+            return None
+
         try:
-            module = importlib.import_module(f"catalog.{cat.plugin_file.replace('.py', '')}")
+            module = importlib.import_module(f"catalog.{module_name}")
             plugin_cls = getattr(module, "StrategyPlugin")
             # Merge default_params with any subscription overrides
             params = dict(cat.default_params or {})
             self._plugins[instance_id] = plugin_cls(instance_id, params)
-            log.info("Plugin loaded", instance_id=instance_id, plugin=cat.plugin_file)
+            log.info("Plugin loaded", instance_id=instance_id, module=module_name)
             return self._plugins[instance_id]
         except Exception as e:
-            log.error("Plugin load failed", instance_id=instance_id, error=str(e))
+            log.error("Plugin load failed", instance_id=instance_id, module=module_name, error=str(e))
             return None
 
     # ------------------------------------------------------------------

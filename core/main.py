@@ -480,12 +480,24 @@ async def _supervisor_loop(engine=None):
             return
 
     log.info("Supervisor loop started", feed=engine._feed.source)
+    consecutive_errors = 0
+    last_error_log = 0.0
     while True:
         try:
             await asyncio.sleep(1.0)
             await engine.tick()
+            consecutive_errors = 0  # Reset on success
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            log.error("Supervisor loop error", error=str(e))
-            await asyncio.sleep(5.0)
+            consecutive_errors += 1
+            now = time.time()
+            # Log first error immediately, then throttle to every 60s
+            if consecutive_errors == 1 or (now - last_error_log) > 60:
+                log.error(
+                    "Supervisor loop error",
+                    error=str(e),
+                    consecutive=consecutive_errors,
+                )
+                last_error_log = now
+            await asyncio.sleep(min(5.0 * consecutive_errors, 60.0))
