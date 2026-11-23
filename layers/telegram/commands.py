@@ -366,7 +366,18 @@ def _wrap(handler, bot_manager: BotManager):
 # ---------------------------------------------------------------------------
 
 async def _get_session(bot_manager: BotManager):
-    """Get an async DB session from the bot manager's session factory."""
+    """Get an async DB session from the bot manager's session factory.
+    
+    Always returns a session factory context manager.
+    If DB is unavailable, returns a no-op context manager.
+    """
+    if bot_manager._session_factory is None:
+        # Return a no-op context manager that yields None
+        import contextlib
+        @contextlib.asynccontextmanager
+        async def noop_session():
+            yield None
+        return noop_session()
     return bot_manager._session_factory()
 
 
@@ -394,9 +405,31 @@ def _build_strategy_keyboard(action: str, strategies) -> InlineKeyboardMarkup:
 
 
 async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Browse available strategies from the DB catalog."""
-    async with await _get_session(context.bot_data["bot_manager"]) as session:
-        result = await session.execute(
+    """Browse available strategies from the DB catalog (with in-memory fallback)."""
+    bot_mgr = context.bot_data["bot_manager"]
+    session = await _get_session(bot_mgr)
+    
+    if session is None:
+        # In-memory fallback
+        from layers.state.fallback_db import get_catalog
+        strategies_data = await get_catalog()
+        if not strategies_data:
+            await update.message.reply_text("📋 No active strategies in catalog.")
+            return
+        
+        lines = ["📋 *Available Strategies:*", ""]
+        for i, s in enumerate(strategies_data, 1):
+            lines.append(f"{i}. *{s['id']}* — {s['display_name']}")
+            lines.append(f"   {s['underlying']} | {s['strategy_type']} | v{s['version']}")
+        lines.append("")
+        lines.append("ℹ️ *Database unavailable* — showing in-memory catalog")
+        lines.append("Use /subscribe, /arm, /disarm, /unsubscribe to manage.")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+    
+    # Normal DB path
+    async with session as s:
+        result = await s.execute(
             select(StrategyCatalog).where(StrategyCatalog.is_active == True).order_by(StrategyCatalog.id)  # noqa: E712
         )
         strategies = result.scalars().all()
@@ -620,7 +653,23 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     uid = _parse_user_id(user_id)
     bot_mgr = context.bot_data["bot_manager"]
 
-    async with await _get_session(bot_mgr) as session:
+    session_ctx = await _get_session(bot_mgr)
+    async with session_ctx as session:
+        if session is None:
+            # In-memory fallback: show degraded status
+            from layers.state.fallback_db import get_catalog
+            catalog = await get_catalog()
+            lines = [
+                "📊 *Status* (degraded — database unavailable)",
+                "",
+                f"*Available Strategies:* {len(catalog)} in catalog",
+                "No subscriptions or instances tracked.",
+                "",
+                "Use /catalog, /balance, /help for more info.",
+            ]
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            return
+        
         # Get subscriptions with catalog info
         result = await session.execute(
             select(UserSubscription, StrategyCatalog)
@@ -696,13 +745,17 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(f"❌ Failed to fetch balance: {e}")
         return
 
-    # Get user's risk limit for floor calculation
-    async with await _get_session(bot_mgr) as session:
-        risk_result = await session.execute(
-            select(RiskLimit).where(RiskLimit.user_id == uid)
-        )
-        risk = risk_result.scalar_one_or_none()
-        floor_pct = risk.balance_floor_pct if risk else 0.20
+    # Get user's risk limit for floor calculation (with fallback)
+    session_ctx = await _get_session(bot_mgr)
+    async with session_ctx as session:
+        if session is None:
+            floor_pct = 0.20  # Default when DB unavailable
+        else:
+            risk_result = await session.execute(
+                select(RiskLimit).where(RiskLimit.user_id == uid)
+            )
+            risk = risk_result.scalar_one_or_none()
+            floor_pct = risk.balance_floor_pct if risk else 0.20
 
     floor_amount = balance.total_equity * floor_pct
     ts = datetime.fromtimestamp(balance.timestamp, tz=timezone.utc).strftime("%H:%M:%S UTC")
@@ -727,7 +780,12 @@ async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     uid = _parse_user_id(user_id)
     bot_mgr = context.bot_data["bot_manager"]
 
-    async with await _get_session(bot_mgr) as session:
+    session_ctx = await _get_session(bot_mgr)
+    async with session_ctx as session:
+        if session is None:
+            await update.message.reply_text("📈 No open positions tracked (database unavailable).")
+            return
+        
         result = await session.execute(
             select(StrategyInstance).where(
                 StrategyInstance.user_id == uid,
@@ -759,7 +817,12 @@ async def cmd_profit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     uid = _parse_user_id(user_id)
     bot_mgr = context.bot_data["bot_manager"]
 
-    async with await _get_session(bot_mgr) as session:
+    session_ctx = await _get_session(bot_mgr)
+    async with session_ctx as session:
+        if session is None:
+            await update.message.reply_text("💵 No P&L data tracked (database unavailable).")
+            return
+        
         result = await session.execute(
             select(
                 func.sum(StrategyInstance.unrealized_pnl).label("total_unrealized"),
