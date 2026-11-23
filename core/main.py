@@ -203,7 +203,7 @@ async def lifespan(app: FastAPI):
                     # NSE_FNO, but SENSEX options live on BSE_FNO (Dhan) /
                     # BSE_FO (Upstox). The ON CONFLICT DO NOTHING above only
                     # inserts missing rows; this UPDATE fixes existing ones.
-                    await session.execute(text(
+                    await session.execute(_text(
                         "UPDATE strategy_catalog SET segment = 'BSE_FNO' "
                         "WHERE underlying = 'SENSEX' AND segment = 'NSE_FNO'"
                     ))
