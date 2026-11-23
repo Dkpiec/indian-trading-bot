@@ -244,14 +244,47 @@ async def lifespan(app: FastAPI):
     else:
         log.warning("UPSTOX_ACCESS_TOKEN not set — Upstox REST disabled")
 
-    if settings.dhan_access_token and settings.dhan_client_id:
-        dhan_client = DhanClient(
-            client_id=settings.dhan_client_id,
-            access_token=settings.dhan_access_token,
-        )
-        log.info("Dhan REST client initialized")
+    # Resolve Dhan credentials with the same disk-first logic as the live
+    # V0 engine (brokers.get_broker_credential): a daily-rotated token in a
+    # coolify.env file must be picked up live, not only from the env that was
+    # baked in at container build. Fall back to Settings / os.environ.
+    def _disk_credential(key: str, settings_val: str) -> str:
+        if settings_val:
+            return settings_val
+        import os
+        for path in (
+            "/app/coolify.env",
+            "/opt/data/trading-engine/coolify.env",
+            "/opt/data/secrets/coolify.env",
+        ):
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        if k.strip() == key:
+                            v = v.strip()
+                            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                                v = v[1:-1]
+                            if v:
+                                return v
+            except Exception:
+                continue
+        return os.environ.get(key, "")
+
+    dhan_token = _disk_credential("DHAN_ACCESS_TOKEN", settings.dhan_access_token)
+    dhan_client_id = _disk_credential("DHAN_CLIENT_ID", settings.dhan_client_id)
+
+    if dhan_token and dhan_client_id:
+        dhan_client = DhanClient(client_id=dhan_client_id, access_token=dhan_token)
+        log.info("Dhan REST client initialized", source="settings" if (settings.dhan_access_token and settings.dhan_client_id) else "disk/env")
     else:
-        log.warning("DHAN credentials incomplete — Dhan REST disabled")
+        log.warning("DHAN credentials incomplete — Dhan REST disabled",
+                    token_set=bool(dhan_token), client_id_set=bool(dhan_client_id))
 
     app.state.upstox_client = upstox_client
     app.state.dhan_client = dhan_client

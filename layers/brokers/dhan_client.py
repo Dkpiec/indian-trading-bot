@@ -39,15 +39,22 @@ class DhanClient(BrokerBase):
         }
 
     async def get_balance(self) -> BalanceSnapshot:
+        # Dhan v2 fundlimit is a GET with NO body (the official DhanHQ-py SDK
+        # calls self.dhan_http.get("/fundlimit")). A POST with an empty body
+        # returns DH-905 "Missing required fields" — this is the root cause of
+        # /balance and the arm-gate silently failing.
         url = f"{DHAN_BASE}/fundlimit"
-        resp = await self._http.post(url, json={}, headers=self._headers())
+        resp = await self._http.get(url, headers=self._headers())
         if resp.status_code != 200:
             raise RuntimeError(f"Dhan balance failed: {resp.status_code} {resp.text}")
         data = resp.json()
-        # Dhan fundlimit response keys vary; normalize defensively
-        total = float(data.get("totalBalance", data.get("totalEquity", 0)))
-        free = float(data.get("availabelBalance", data.get("availableBalance", data.get("freeCash", 0))))
-        used = float(data.get("usedMargin", data.get("marginUsed", 0)))
+        # Dhan fundlimit fields (real API shape):
+        #   availabelBalance (note: Dhan's actual spelling) — cash available to trade
+        #   sodLimit         — start-of-day balance (true account size = free + used)
+        #   utilizedAmount   — margin locked by open positions
+        free = float(data.get("availabelBalance", data.get("availableBalance", 0)))
+        used = float(data.get("utilizedAmount", data.get("usedMargin", 0)))
+        total = float(data.get("sodLimit", free + used))
         return BalanceSnapshot(
             total_equity=total,
             free_balance=free,
