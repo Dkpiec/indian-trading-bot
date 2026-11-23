@@ -464,19 +464,28 @@ class UpstoxWSV3:
             if not feeder:
                 log.error("Upstox WS feeder unavailable — cannot start feed")
                 return
+            # Cooldown: if we just failed a handshake within the last 15 min,
+            # skip this attempt. Upstox's gateway tracks open connections per
+            # user (2–5 slots). Our repeated failed handshakes consumed the
+            # one-time ?code= tokens AND the connection slots; the gateway
+            # now 403s new tokens until the slots clear (5–30 min). Waiting
+            # avoids further poisoning.
+            now = time.time()
+            _last_fail = getattr(self, "_last_ws_fail_ts", 0.0)
+            if _last_fail and (now - _last_fail) < 900:
+                log.debug("Upstox v3 WS in cooldown (waiting for gateway slots to clear)",
+                          retry_in_s=int(900 - (now - _last_fail)))
+                return
             auth = self.api_client.configuration.auth_settings().get("OAUTH2", {}).get("value", "")
             if feeder.ws and feeder.ws.sock:
                 return
             headers = {"Authorization": auth, "Accept": "*/*"}
             sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
-            # Per the Upstox V3 docs and the SDK's own feeder.connect():
-            # connect to wss://api.upstox.com/v3/feed/market-data-feed and
-            # let websocket-client follow the 302 redirect to the authorized
-            # wsfeeder-api target IN-SESSION (redirect_limit default=3).
-            # This is exactly what the SDK does — no /authorize endpoint,
-            # no raw-socket _resolve, no TLS session break.
+            # SDK-native: connect to wss://api.upstox.com/v3/feed/market-data-feed
+            # and let websocket-client follow the 302 redirect to wsfeeder-api
+            # in-session. Byte-identical to the SDK's own feeder.connect().
             ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
-            log.info("Upstox v3 WS connecting (SDK-native redirect follow)",
+            log.info("Upstox v3 WS connecting (SDK-native, cooldown cleared)",
                      target=ws_url, instruments=len(self.instrumentKeys))
             feeder.ws = _ws.WebSocketApp(
                 ws_url,
@@ -490,6 +499,15 @@ class UpstoxWSV3:
                 target=feeder.ws.run_forever,
                 kwargs={"sslopt": sslopt},
             ).start()
+
+        # Mark a WS failure so _connect_patched enters cooldown
+        _orig_error = streamer.handle_error
+        def _error_cooled(self, error):
+            self._last_ws_fail_ts = time.time()
+            log.warning("Upstox v3 WS error — entering 15-min cooldown",
+                       error=str(error)[:150])
+            _orig_error(error)
+        streamer.handle_error = _error_cooled.__get__(streamer, type(streamer))
 
         streamer.connect = _connect_patched.__get__(streamer, type(streamer))
         log.debug("Upstox v3 WS feed redirect patch applied")
