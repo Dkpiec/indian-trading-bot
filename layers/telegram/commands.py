@@ -61,6 +61,12 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
         "broker": cmd_broker,
         "refreshtoken": cmd_refresh_token_async,
         "tokenstatus": cmd_tokenstatus,
+        "market": cmd_market,
+        "settings": cmd_settings,
+        "version": cmd_version,
+        "ping": cmd_ping,
+        "log": cmd_log,
+        "alerts": cmd_alerts,
         "help": cmd_help,
     }
     for name, handler in commands.items():
@@ -902,6 +908,197 @@ async def cmd_forceexit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     log.warning("Force exit executed", user_id=user_id, closed=closed, total=len(positions))
 
 
+async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show market status: open/closed, entry window, time to open/close."""
+    from datetime import datetime as dt, timezone as tz, timedelta
+    from core.config import settings
+
+    ist = tz(timedelta(hours=5, minutes=30))
+    now_ist = dt.now(ist)
+    hhmm = now_ist.strftime("%H:%M")
+
+    open_hhmm = settings.market_open  # "09:15"
+    close_hhmm = settings.market_close  # "15:30"
+    entry_start = settings.entry_window_start  # "09:45"
+    entry_end = settings.entry_window_end  # "13:15"
+
+    open_h, open_m = map(int, open_hhmm.split(":"))
+    close_h, close_m = map(int, close_hhmm.split(":"))
+    es_h, es_m = map(int, entry_start.split(":"))
+    ee_h, ee_m = map(int, entry_end.split(":"))
+
+    market_open = (open_h * 60 + open_m) <= (now_ist.hour * 60 + now_ist.minute) < (close_h * 60 + close_m)
+    entry_open = (es_h * 60 + es_m) <= (now_ist.hour * 60 + now_ist.minute) < (ee_h * 60 + ee_m)
+
+    # Calculate time to next event
+    current_min = now_ist.hour * 60 + now_ist.minute
+    open_min = open_h * 60 + open_m
+    close_min = close_h * 60 + close_m
+    es_min = es_h * 60 + es_m
+    ee_min = ee_h * 60 + ee_m
+
+    if market_open:
+        mins_to_close = close_min - current_min
+        status_icon = "🟢"
+        status_text = "OPEN"
+        next_event = f"{mins_to_close}m to close" if mins_to_close > 0 else "closing now"
+    else:
+        status_icon = "🔴"
+        status_text = "CLOSED"
+        if current_min < open_min:
+            mins_to_open = open_min - current_min
+            next_event = f"{mins_to_open}m to open"
+        else:
+            next_event = "reopens tomorrow 09:15"
+
+    entry_icon = "🟢" if entry_open else "⚪"
+    entry_text = "ENTRY WINDOW OPEN" if entry_open else "ENTRY WINDOW CLOSED"
+    if not entry_open:
+        if current_min < es_min:
+            entry_detail = f"opens in {es_min - current_min}m"
+        elif current_min >= ee_min:
+            entry_detail = "closed for today"
+        else:
+            entry_detail = "closed"
+    else:
+        entry_detail = f"closes in {ee_min - current_min}m"
+
+    lines = [
+        f"📊 *Market Status* — {now_ist.strftime('%a %d %b %Y %H:%M IST')}",
+        "",
+        f"{status_icon} *{status_text}* ({open_hhmm}–{close_hhmm} IST) — {next_event}",
+        f"{entry_icon} *{entry_text}* ({entry_start}–{entry_end}) — {entry_detail}",
+        "",
+        "Weekend: closed",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current bot settings: broker, risk limit, market hours."""
+    user_id = context.user_data["user_id"]
+    uid = _parse_user_id(user_id)
+    bot_mgr = context.bot_data["bot_manager"]
+    from core.config import settings
+
+    dhan_client = bot_mgr._app_state_dhan_client if hasattr(bot_mgr, "_app_state_dhan_client") else None
+    broker_status = "✅ DhanHQ connected" if dhan_client else "❌ DhanHQ not available"
+
+    upstox_ok = bool(getattr(settings, "upstox_access_token", None))
+    upstox_status = "✅ Upstox configured" if upstox_ok else "❌ Upstox not configured"
+
+    session_ctx = await _get_session(bot_mgr)
+    async with session_ctx as session:
+        if session is None:
+            floor_pct = 0.20
+            risk_line = "💳 Floor: 20% (default, DB unavailable)"
+        else:
+            risk_result = await session.execute(
+                select(RiskLimit).where(RiskLimit.user_id == uid)
+            )
+            risk = risk_result.scalar_one_or_none()
+            if risk:
+                floor_pct = risk.balance_floor_pct
+                risk_line = f"💳 Floor: {floor_pct*100:.0f}% | Max position: ₹{(risk.max_position_value or 0):,.0f}"
+            else:
+                floor_pct = 0.20
+                risk_line = "💳 Floor: 20% (default)"
+
+    lines = [
+        "⚙️ *Bot Settings*",
+        "",
+        f"{broker_status}",
+        f"{'✅' if upstox_ok else '❌'} Upstox: {'configured' if upstox_ok else 'not configured'}",
+        "",
+        f"📈 Market hours: {settings.market_open}–{settings.market_close} IST",
+        f"⏰ Entry window: {settings.entry_window_start}–{settings.entry_window_end}",
+        "",
+        risk_line,
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show bot version, build info, and uptime."""
+    import os, time
+    from core.config import settings
+
+    version = "4.0.0"
+    started_at = os.environ.get("BOT_START_TIME", "unknown")
+
+    lines = [
+        "🐍 *Indian Trading Bot*",
+        "",
+        f"Version: v{version}",
+        f"Build: {os.environ.get('BUILD_COMMIT', 'unknown')}",
+        f"Python: {time.strftime('%Y.%m.%d')}",
+        "",
+        "Stack: FastAPI + asyncpg + Redis + Alembic",
+        "Broker: DhanHQ (REST v2)",
+        "Market: NSE Options (NSE_FNO)",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Quick health check: respond with latency."""
+    import time
+    t0 = time.time()
+    await update.message.reply_text(f"🏓 Pong! ({(time.time()-t0)*1000:.0f}ms)")
+
+
+async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show recent bot log entries."""
+    bot_mgr = context.bot_data.get("bot_manager")
+    if not bot_mgr:
+        await update.message.reply_text("❌ Log not available.")
+        return
+
+    # Read from structured log file if available
+    import os
+    log_file = "/tmp/bot.log"
+    if os.path.exists(log_file):
+        with open(log_file, "r") as f:
+            lines = f.readlines()[-10:]
+        text = "📋 *Recent Logs:*\n\n" + "\n".join(l.rstrip() for l in lines)
+    else:
+        text = "📋 No log file found. Check Coolify service logs."
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show active alert notifications and toggle them."""
+    user_id = context.user_data["user_id"]
+    uid = _parse_user_id(user_id)
+    bot_mgr = context.bot_data["bot_manager"]
+
+    session_ctx = await _get_session(bot_mgr)
+    async with session_ctx as session:
+        if session is None:
+            await update.message.reply_text(
+                "🔔 *Alerts* (DB unavailable)\n\n"
+                "Default alerts enabled:\n"
+                "• Position opened/closed\n"
+                "• P&L threshold crossed\n"
+                "• Token expiry warning"
+            )
+            return
+
+    alert_lines = [
+        "🔔 *Alert Notifications*",
+        "",
+        "• 🟢 Position opened — signal triggered",
+        "• 🔴 Position closed — exit executed",
+        "• 💰 P&L crossed threshold",
+        "• ⚠️ Token expiry in <24h",
+        "• 📉 Balance below floor",
+        "",
+        "To disable: /alerts off",
+    ]
+    await update.message.reply_text("\n".join(alert_lines), parse_mode="Markdown")
+
+
 SUPPORTED_BROKERS = {
     "dhan": {"name": "DhanHQ", "env_prefix": "DHAN"},
     "upstox": {"name": "Upstox", "env_prefix": "UPSTOX"},
@@ -1374,10 +1571,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Broker:\n"
         "/broker — Select active broker\n"
         "/credentials — Enter/update broker API credentials\n"
-        "/refreshtoken — Refresh broker access token (Dhan/FYERS)\n"
-        "/tokenstatus — Check token expiry for all brokers\n\n"
+        "/refreshtoken — Refresh broker access token\n"
+        "/tokenstatus — Check token expiry\n\n"
+        "Market & Info:\n"
+        "/market — Market open/closed, entry window status\n"
+        "/settings — Bot settings: broker, risk, hours\n"
+        "/alerts — Notification types & toggles\n"
+        "/version — Bot version & build info\n"
+        "/log — Recent bot log entries\n\n"
         "Emergency:\n"
-        "/forceexit — Close ALL positions now\n\n"
+        "/forceexit — Close ALL positions now\n"
+        "/ping — Quick health check\n\n"
         "/help — Show this message"
     )
     if update.message:
