@@ -471,12 +471,14 @@ def create_app() -> FastAPI:
     from rpc.catalog import router as catalog_router
     from rpc.admin import router as admin_router
     from rpc.telegram_api import router as telegram_router
+    from rpc.audit import router as audit_router
 
     app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth"])
     app.include_router(strategies_router, prefix="/api/v1/strategies", tags=["strategies"])
     app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["catalog"])
     app.include_router(admin_router, prefix="/api/v1/admin", tags=["admin"])
     app.include_router(telegram_router, prefix="/api/v1/telegram", tags=["telegram"])
+    app.include_router(audit_router, prefix="/api/v1/debug", tags=["debug"])
 
     return app
 
