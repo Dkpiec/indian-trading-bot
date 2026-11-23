@@ -90,16 +90,31 @@ class DhanClient(BrokerBase):
             "message": data.get("errorMessage", resp.text),
         }
 
-    async def get_index_ltp(self, symbol: str = "NSE") -> Optional[float]:
-        """Fetch the index spot price (free endpoint) for a Dhan index symbol.
+    # Free index spot source (Yahoo v8 chart API — no Dhan charge).
+    # Mirrors the free source the SLHUNT plugins use, so ORB strategies can
+    # evaluate breakout/breakdown signals without a resolved option contract.
+    # Yahoo has NIFTY (and BANKNIFTY) index tickers but NO free SENSEX one.
+    # SENSEX falls back to the Dhan poll only; the Dhan index LTP is the
+    # primary source for SENSEX.
+    YAHOO_INDEX = {"NIFTY": "%5ENSEI", "BANKNIFTY": "%5ENSEIBANKNIFTY"}
 
-        Accepts a Dhan index code (NIFTY, SENSEX, BANKNIFTY) or an
-        underlying name; maps to the Dhan index security IDs.
+    async def get_index_ltp(self, symbol: str = "NSE") -> Optional[float]:
+        """Fetch the index spot price for NIFTY/SENSEX/BANKNIFTY.
+
+        Primary: Dhan /v2/quotes index poll (free). Fallback: the FREE
+        Yahoo v8 chart API (the same source the SLHUNT plugins use for
+        5m bars) — never a chargeable Dhan historical endpoint.
         """
+        dhan_val = await self._dhan_index_ltp(symbol)
+        if dhan_val is not None:
+            return dhan_val
+        return await self._yahoo_index_ltp(symbol)
+
+    async def _dhan_index_ltp(self, symbol: str) -> Optional[float]:
+        """Dhan /v2/quotes index poll (free, not historical data)."""
         # Dhan index security IDs (public constants from the Dhan v2 API docs)
         index_ids = {"NIFTY": "mid3101", "SENSEX": "mid3040"}
         code = symbol.upper()
-        # Strip trailing option-contract suffixes: NIFTY_6e_CE, NIFTY_25DEC25_CE_PE, ...
         for suffix in ("_CE_PE", "_PE", "_CE"):
             code = code.replace(suffix, "")
         code = code.replace("_", "")
@@ -111,7 +126,8 @@ class DhanClient(BrokerBase):
         if not sid:
             return None
         try:
-            url = f"{DHAN_BASE}/quotes"
+            # Dhan v2 live quote endpoint (free, not historical data).
+            url = f"{DHAN_BASE}/market/quote"
             payload = {"securityId": sid, "exchangeSegment": "INDEX"}
             resp = await self._http.post(url, json=payload, headers=self._headers())
             if resp.status_code == 200:
@@ -129,6 +145,35 @@ class DhanClient(BrokerBase):
             log.warning("Dhan index LTP poll failed", symbol=symbol, error=str(e))
         return None
 
+    async def _yahoo_index_ltp(self, symbol: str) -> Optional[float]:
+        """Free Yahoo v8 chart API — last close as the spot proxy."""
+        import json as _json
+        import urllib.request
+        code = symbol.upper().replace("_", "")
+        for suffix in ("_CE_PE", "_PE", "_CE"):
+            code = code.replace(suffix, "")
+        for known in self.YAHOO_INDEX:
+            if code.startswith(known):
+                code = known
+                break
+        ticker = self.YAHOO_INDEX.get(code)
+        if not ticker:
+            return None
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = _json.loads(resp.read().decode())
+            result = (data.get("chart", {}).get("result") or [None])[0]
+            if not result:
+                return None
+            close = (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [None])
+            last = [v for v in close if v is not None]
+            return float(last[-1]) if last else None
+        except Exception as e:
+            log.warning("Yahoo index LTP poll failed", symbol=symbol, error=str(e))
+        return None
+
     async def get_option_ltp(self, symbol: str, security_id: str = "") -> Optional[float]:
         """Fetch latest LTP for an option contract via Dhan option chain.
 
@@ -139,7 +184,8 @@ class DhanClient(BrokerBase):
             return None
         try:
             # Dhan quote endpoint: free, returns LTP for a security
-            url = f"{DHAN_BASE}/quotes"
+            # Dhan v2 live quote endpoint (free, not historical data).
+            url = f"{DHAN_BASE}/market/quote"
             payload = {"securityId": str(security_id), "exchangeSegment": "NSE_FNO"}
             resp = await self._http.post(url, json=payload, headers=self._headers())
             if resp.status_code == 200:
@@ -153,19 +199,23 @@ class DhanClient(BrokerBase):
         return None
 
     async def get_order_status(self, broker_order_id: str) -> Dict[str, Any]:
-        url = f"{DHAN_BASE}/orders/{broker_order_id}"
-        params = {"dhanClientId": self._client_id}
-        resp = await self._http.get(url, headers=self._headers(), params=params)
+        url = f"{DHAN_BASE}/orderbook/trade/{broker_order_id}"
+        payload = {"dhanClientId": self._client_id}
+        resp = await self._http.post(url, json=payload, headers=self._headers())
         if resp.status_code != 200:
             return {"status": "UNKNOWN", "message": resp.text}
         data = resp.json()
-        dhan_status = str(data.get("orderStatus", data.get("status", ""))).upper()
-        return {"status": dhan_status, "raw": data}
+        trades = data.get("data", {}).get("trades", [])
+        dhan_status = str(data.get("status", "")).upper() if isinstance(data.get("status"), str) else ""
+        return {"status": dhan_status or "OPEN", "raw": data}
 
     async def cancel_order(self, broker_order_id: str) -> Dict[str, Any]:
-        url = f"{DHAN_BASE}/orders/{broker_order_id}"
-        params = {"dhanClientId": self._client_id}
-        resp = await self._http.delete(url, headers=self._headers(), params=params)
+        url = f"{DHAN_BASE}/orderbook/trade/cancel"
+        payload = {
+            "dhanClientId": self._client_id,
+            "transactionId": broker_order_id,
+        }
+        resp = await self._http.post(url, json=payload, headers=self._headers())
         if resp.status_code == 200:
             return {"status": "CANCELLED", "message": ""}
         return {"status": "ERROR", "message": resp.text}
