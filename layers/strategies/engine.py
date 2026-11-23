@@ -645,8 +645,15 @@ class ExecutionEngine:
         underlying = cat.underlying or "NIFTY"
         segment = cat.segment or "NSE_FNO"
         params = cat.default_params or {}
-        strike = params.get("strike", "ATM")
+        strike = params.get("strike", 0)
+        expiry = params.get("expiry", "")
         option_type = params.get("legs", ["CE"])[0] if params.get("legs") else "CE"
+        try:
+            strike_f = float(strike)
+        except (TypeError, ValueError):
+            strike_f = 0.0
+        if strike_f > 0 and expiry:
+            return resolve_instrument_key(underlying, strike_f, expiry, option_type, segment)
         return f"{segment}|{strike}_{underlying}_{option_type}"
 
     def _in_market_hours(self) -> bool:
