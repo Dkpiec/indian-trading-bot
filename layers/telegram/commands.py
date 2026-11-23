@@ -730,8 +730,8 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Late-bind the Dhan client if it was unavailable at init time. The
     # broker layer starts after the bot, so the cached reference is None.
-    if bot_manager._app_state_dhan_client is None and dhan_client is not None:
-        bot_manager.set_dhan_client(dhan_client)
+    if bot_mgr._app_state_dhan_client is None and dhan_client is not None:
+        bot_mgr.set_dhan_client(dhan_client)
 
     if not dhan_client:
         if update.message:
