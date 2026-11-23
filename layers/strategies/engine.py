@@ -246,7 +246,11 @@ class ExecutionEngine:
             try:
                 await self._process_subscription(sub)
             except Exception as e:
-                log.error("Strategy execution error", catalog_id=sub.catalog_id, error=str(e))
+                log.error("Strategy execution error",
+                          catalog_id=sub.catalog_id,
+                          error_type=type(e).__name__,
+                          error=str(e),
+                          traceback=__import__('traceback').format_exc())
 
     # ------------------------------------------------------------------
     # Per-subscription processing
