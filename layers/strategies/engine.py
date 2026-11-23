@@ -51,18 +51,38 @@ class MarketDataFeed:
         self._ws_running = False
         self._ws_task: Optional[asyncio.Task] = None
         self._last_poll_ts = 0.0
+        self._ws_subscribed: set = set()  # keys already subscribed to the WS
 
     async def start(self, instrument_keys: List[str]) -> None:
-        """Start the Upstox WS feed and begin Dhan fallback polling."""
+        """Start the Upstox WS feed (or subscribe new keys if already running).
+
+        Idempotent: on a second call with the WS already running, only the
+        NEW keys are subscribed. A no-key call is a no-op when the WS is
+        already running (nothing new to add).
+        """
         if not self._upstox_ws:
-            log.info("WS feed disabled — all LTP via Dhan poll")
+            if not self._ws_running:
+                log.info("WS feed disabled — all LTP via Dhan poll")
             return
+        new_keys = [k for k in instrument_keys if k and k not in self._ws_subscribed]
+        if self._ws_running:
+            if new_keys:
+                try:
+                    await self._upstox_ws.subscribe(new_keys, mode="ltpc")
+                    self._ws_subscribed.update(new_keys)
+                    log.info("Upstox WS: subscribed new instruments",
+                             count=len(new_keys), keys=new_keys[:5])
+                except Exception as e:
+                    log.warning("Upstox WS subscribe failed", error=str(e))
+            return
+        # First start
         if not instrument_keys:
             log.info("WS feed has no instrument keys — all LTP via Dhan poll")
             return
         try:
             await self._upstox_ws.start(instrument_keys, mode="ltpc")
             self._ws_running = True
+            self._ws_subscribed.update(instrument_keys)
             self._ws_task = asyncio.create_task(self._ws_consume())
             log.info("Upstox WS started", instruments=len(instrument_keys))
         except Exception as e:
@@ -89,6 +109,12 @@ class MarketDataFeed:
         """
         try:
             async for tick in self._upstox_ws.ticks():
+                ttype = tick.get("type", "tick")
+                if ttype in ("ws_close", "ws_error"):
+                    log.warning("Upstox WS closed/error — falling back to Dhan",
+                                code=tick.get("code"), error=tick.get("error"))
+                    self._ws_running = False
+                    continue
                 key = tick.get("instrument_key", "")
                 ltp = tick.get("last_price")
                 if key and ltp:
@@ -103,11 +129,27 @@ class MarketDataFeed:
             log.warning("Upstox WS consume error", error=str(e))
 
     async def get_ltp(self, instrument_key: str, security_id: str = "", symbol: str = "") -> Optional[float]:
-        """Get latest LTP for an instrument. Tries WS cache, then Dhan poll."""
+        """Get latest LTP for an instrument. Tries WS cache, then Dhan poll.
+
+        When the WS is running and the key is subscribed, wait up to ~3s for
+        the first tick before falling back to Dhan (avoids the chargeable
+        option-chain call on cold start).
+        """
         # 1. Check WS cache (fresh tick < 5s old)
         cached = self._ticks.get(instrument_key)
         if cached and (time.time() - cached["ts"]) < 5.0:
             return cached["ltp"]
+
+        # 1b. WS is running and this key is subscribed — give the feed a
+        #     short grace period for the first tick (cold start / re-sub).
+        if self._ws_running and instrument_key in getattr(self, "_ws_subscribed", set()):
+            for _ in range(6):
+                await asyncio.sleep(0.5)
+                cached = self._ticks.get(instrument_key)
+                if cached and (time.time() - cached["ts"]) < 5.0:
+                    return cached["ltp"]
+            # Still no tick — fall through to Dhan (the key is valid but the
+            # feed may be slow or the instrument delisted).
 
         # 2. Dhan fallback: poll quotes for the security_id
         if self._dhan:
@@ -294,7 +336,14 @@ class ExecutionEngine:
 
     async def start(self) -> None:
         self._running = True
-        log.info("ExecutionEngine started", feed_source=self._feed.source)
+        # Start the WS feed with the instrument keys for all currently armed
+        # subscriptions. New keys are re-subscribed on each tick (the
+        # _ws_subscribed set in tick() below), so keys that arm later are
+        # picked up within one second.
+        keys = await self._collect_armed_keys()
+        await self._feed.start(keys)
+        log.info("ExecutionEngine started", feed_source=self._feed.source,
+                 ws_instruments=len(keys))
 
     async def stop(self) -> None:
         self._running = False
@@ -365,6 +414,13 @@ class ExecutionEngine:
                 return
 
         uid = sub.user_id
+
+        # Re-subscribe this key to the WS feed if it's new (armed after
+        # engine start). feed.start() is idempotent: it only subscribes
+        # keys not already in _ws_subscribed.
+        key = self._get_instrument_key(cat)
+        if key not in getattr(self._feed, "_ws_subscribed", set()):
+            await self._feed.start([key])
 
         # Load or create the strategy instance
         instance_id = f"{uid.hex[:8]}_{cat.id}"
@@ -469,6 +525,25 @@ class ExecutionEngine:
             state["or_mid"] = cat.default_params.get("or_mid", 0)
 
         return state
+
+    async def _collect_armed_keys(self) -> List[str]:
+        """Collect Upstox instrument keys for all armed subscriptions."""
+        from sqlalchemy import select
+        from layers.state.models import UserSubscription, StrategyCatalog
+        keys: List[str] = []
+        async with self._session_factory() as session:
+            subs = (await session.execute(
+                select(UserSubscription).where(UserSubscription.status == "armed")
+            )).scalars().all()
+            for sub in subs:
+                cat_res = await session.execute(
+                    select(StrategyCatalog).where(StrategyCatalog.id == sub.catalog_id)
+                )
+                cat = cat_res.scalar_one_or_none()
+                if not cat:
+                    continue
+                keys.append(self._get_instrument_key(cat))
+        return keys
 
     def _entry_window_open(self) -> bool:
         """True only inside the 09:45:05-13:15:00 IST weekday entry window."""

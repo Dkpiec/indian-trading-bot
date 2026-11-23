@@ -104,6 +104,19 @@ class UpstoxWSV3:
                 await asyncio.sleep(3)
             except Exception as e:
                 log.error("Upstox v3 WS reconnect failed", error=str(e))
+        # Re-subscribe the initial keys explicitly. The SDK's handle_open
+        # calls subscribe_to_initial_keys() inside the WS on_open callback,
+        # but if the socket wasn't ready at that moment the subscribe raises
+        # "WebSocket is not open." and is silently swallowed by
+        # websocket-client. This explicit call guarantees the keys are sent
+        # once the socket is confirmed open.
+        if instrument_keys and feeder and feeder.ws and feeder.ws.sock:
+            try:
+                self._streamer.subscribe(list(instrument_keys), mode)
+                log.info("Upstox v3 WS initial subscribe sent",
+                         count=len(instrument_keys))
+            except Exception as e:
+                log.error("Upstox v3 WS initial subscribe failed", error=str(e))
 
     async def stop(self) -> None:
         """Disconnect gracefully."""

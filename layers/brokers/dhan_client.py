@@ -98,16 +98,33 @@ class DhanClient(BrokerBase):
     # primary source for SENSEX.
     YAHOO_INDEX = {"NIFTY": "%5ENSEI"}
 
+    # Per-symbol failure state so we stop hammering a dead Dhan endpoint.
+    _index_poll_disabled: Dict[str, float] = {}  # symbol → ts of last Dhan failure
+    _INDEX_POLL_RETRY_S = 300.0  # re-try the Dhan poll every 5 min
+
     async def get_index_ltp(self, symbol: str = "NSE") -> Optional[float]:
         """Fetch the index spot price for NIFTY/SENSEX/BANKNIFTY.
 
-        Primary: Dhan /v2/quotes index poll (free). Fallback: the FREE
-        Yahoo v8 chart API (the same source the SLHUNT plugins use for
-        5m bars) — never a chargeable Dhan historical endpoint.
+        Primary: Dhan live-quote poll (free). Fallback: the FREE Yahoo v8
+        chart API (the same source the SLHUNT plugins use for 5m bars) —
+        never a chargeable Dhan historical endpoint.
+
+        If the Dhan poll keeps failing (e.g. /market/quote 404s for this
+        token), it is disabled for 5 minutes and the Yahoo source is used
+        directly, so we don't log a 404 storm on every tick.
         """
-        dhan_val = await self._dhan_index_ltp(symbol)
-        if dhan_val is not None:
-            return dhan_val
+        now = time.time()
+        last_fail = self._index_poll_disabled.get(symbol, 0.0)
+        if now - last_fail > self._INDEX_POLL_RETRY_S:
+            dhan_val = await self._dhan_index_ltp(symbol)
+            if dhan_val is not None:
+                self._index_poll_disabled.pop(symbol, None)
+                return dhan_val
+            self._index_poll_disabled[symbol] = now
+            log.warning(
+                "Dhan index poll failing — using Yahoo source for 5 min",
+                symbol=symbol,
+            )
         return await self._yahoo_index_ltp(symbol)
 
     async def _dhan_index_ltp(self, symbol: str) -> Optional[float]:
@@ -139,10 +156,10 @@ class DhanClient(BrokerBase):
                 log.debug("Dhan index LTP empty response", symbol=symbol,
                           status=resp.status_code, body=str(resp.text)[:200])
             else:
-                log.warning("Dhan index LTP HTTP error", symbol=symbol,
-                            status=resp.status_code, body=str(resp.text)[:200])
+                log.debug("Dhan index LTP HTTP error", symbol=symbol,
+                          status=resp.status_code, body=str(resp.text)[:200])
         except Exception as e:
-            log.warning("Dhan index LTP poll failed", symbol=symbol, error=str(e))
+            log.debug("Dhan index LTP poll failed", symbol=symbol, error=str(e))
         return None
 
     # Rate-limit Yahoo index polls: max 1 call per 30s per symbol.
