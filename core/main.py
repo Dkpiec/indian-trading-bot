@@ -199,18 +199,18 @@ async def lifespan(app: FastAPI):
                         ('SENSEX102', 'SENSEX SL-Hunt V4.1g', 'SENSEX SL-Hunt V4.1g CE legs', 'sensex_slhunt_ce.py', 'SENSEX', 'BSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1g', NOW(), NOW())
                         ON CONFLICT (id) DO NOTHING
                     """))
-                    # Fix the SENSEX segment in-place: the original seed used
-                    # NSE_FNO, but SENSEX options live on BSE_FNO (Dhan) /
-                    # BSE_FO (Upstox). The ON CONFLICT DO NOTHING above only
-                    # inserts missing rows; this UPDATE fixes existing ones.
-                    await session.execute(_text(
-                        "UPDATE strategy_catalog SET segment = 'BSE_FNO' "
-                        "WHERE underlying = 'SENSEX' AND segment = 'NSE_FNO'"
-                    ))
-                    await session.commit()
                     log.info("Seeded 5 merged strategies (CE+PE legs) from Hermes multi-broker engine")
                 else:
                     log.info(f"Strategy catalog already has {count} entries, skipping seed")
+                # Fix the SENSEX segment in-place on every startup: the
+                # original seed used NSE_FNO, but SENSEX options live on
+                # BSE_FNO (Dhan) / BSE_FO (Upstox). This UPDATE fixes
+                # existing DB rows that were seeded with the wrong segment.
+                await session.execute(_text(
+                    "UPDATE strategy_catalog SET segment = 'BSE_FNO' "
+                    "WHERE underlying = 'SENSEX' AND segment = 'NSE_FNO'"
+                ))
+                await session.commit()
         except Exception as e:
             log.warning("Strategy catalog seed skipped", error=str(e))
     else:

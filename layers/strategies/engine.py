@@ -187,7 +187,9 @@ class MarketDataFeed:
         except Exception as e:
             log.warning("Upstox WS consume error", error=str(e))
 
-    async def get_ltp(self, instrument_key: str, security_id: str = "", symbol: str = "") -> Optional[float]:
+    async def get_ltp(self, instrument_key: str, security_id: str = "", symbol: str = "",
+                      segment: str = "", expiry: str = "", strike: float = 0.0,
+                      option_type: str = "") -> Optional[float]:
         """Get latest LTP for an instrument. Tries WS cache, then Dhan poll.
 
         When the WS is running and the key is subscribed, wait up to ~3s for
@@ -214,7 +216,23 @@ class MarketDataFeed:
         if self._dhan:
             try:
                 if security_id:
-                    ltp = await self._dhan.get_option_ltp(symbol or security_id, security_id=security_id)
+                    ltp = await self._dhan.get_option_ltp(
+                        symbol or security_id, security_id=security_id,
+                        segment=segment, expiry=expiry, strike=strike,
+                        option_type=option_type,
+                    )
+                    if ltp is not None:
+                        self._ticks[instrument_key] = {"ltp": ltp, "ts": time.time(), "src": "dhan"}
+                        return ltp
+                elif segment and strike and option_type:
+                    # No security_id but we have the contract specs — let
+                    # Dhan resolve the security_id from the option chain
+                    # (free endpoint) and fetch the LTP.
+                    ltp = await self._dhan.get_option_ltp(
+                        symbol or instrument_key, security_id="",
+                        segment=segment, expiry=expiry, strike=strike,
+                        option_type=option_type,
+                    )
                     if ltp is not None:
                         self._ticks[instrument_key] = {"ltp": ltp, "ts": time.time(), "src": "dhan"}
                         return ltp

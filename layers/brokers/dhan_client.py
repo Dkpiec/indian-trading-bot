@@ -224,19 +224,30 @@ class DhanClient(BrokerBase):
             log.warning("Yahoo index LTP poll failed", symbol=symbol, error=str(e))
         return None
 
-    async def get_option_ltp(self, symbol: str, security_id: str = "") -> Optional[float]:
-        """Fetch latest LTP for an option contract via Dhan option chain.
+    async def get_option_ltp(self, symbol: str, security_id: str = "",
+                             segment: str = "", expiry: str = "",
+                             strike: float = 0.0, option_type: str = "") -> Optional[float]:
+        """Fetch latest LTP for an option contract via Dhan.
 
-        Dhan's option chain endpoint is free (not historical data).
-        Falls back to quote API if option chain fails.
+        Primary: Dhan /market/quote (free, requires security_id).
+        Fallback: Dhan /option-chain (free) to resolve the security_id
+        from (segment, expiry, strike, CE/PE) when security_id is empty.
+
+        SENSEX options live on BSE_FNO; NIFTY/BANKNIFTY on NSE_FNO.
         """
+        # If no security_id, try to resolve it from the option chain.
+        if not security_id and segment and strike and option_type:
+            security_id = await self._resolve_option_security_id(
+                segment, expiry, strike, option_type
+            )
         if not security_id:
             return None
         try:
-            # Dhan quote endpoint: free, returns LTP for a security
-            # Dhan v2 live quote endpoint (free, not historical data).
+            # Dhan v2 live-quote endpoint (free, not historical data).
             url = f"{DHAN_BASE}/market/quote"
-            payload = {"securityId": str(security_id), "exchangeSegment": "NSE_FNO"}
+            # Normalize segment: Upstox BSE_FO → Dhan BSE_FNO, NSE_FO → NSE_FNO
+            dhan_seg = segment.replace("_FO", "_FNO") if segment else "NSE_FNO"
+            payload = {"securityId": str(security_id), "exchangeSegment": dhan_seg}
             resp = await self._http.post(url, json=payload, headers=self._headers())
             if resp.status_code == 200:
                 data = resp.json()
@@ -246,6 +257,48 @@ class DhanClient(BrokerBase):
                     return float(ltp) if ltp else None
         except Exception as e:
             log.debug("Dhan LTP poll failed", symbol=symbol, error=str(e))
+        return None
+
+    async def _resolve_option_security_id(self, segment: str, expiry: str,
+                                          strike: float, option_type: str) -> Optional[str]:
+        """Resolve a Dhan security_id from the free option-chain endpoint.
+
+        SENSEX options live on BSE_FNO; NIFTY/BANKNIFTY on NSE_FNO.
+        The option chain returns a list of contracts with securityId,
+        strikePrice, expiry, and contract type (CE/PE).
+        """
+        dhan_seg = segment.replace("_FO", "_FNO") if segment else "NSE_FNO"
+        opt_type = option_type.upper()
+        try:
+            url = f"{DHAN_BASE}/option-chain"
+            # Dhan option chain: exchangeSegment, underSecurityId, expiry
+            # For SENSEX: underSecurityId=31 (BSE index), segment=BSE_FNO
+            # For NIFTY:   underSecurityId=13 (NSE index), segment=NSE_FNO
+            underlying_ids = {"NSE_FNO": 13, "BSE_FNO": 31}
+            under_id = underlying_ids.get(dhan_seg, 13)
+            resp = await self._http.post(
+                url,
+                json={"exchangeSegment": dhan_seg, "underSecurityId": under_id},
+                headers=self._headers(),
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                inner = data.get("data", {})
+                # Find the matching contract: strike + CE/PE + nearest expiry
+                ce_pe_key = "CE" if opt_type == "CE" else "PE"
+                for expiry_key, expiry_data in inner.items():
+                    if not isinstance(expiry_data, dict):
+                        continue
+                    for opt in expiry_data.get("data", {}).get(ce_pe_key, []):
+                        if abs(float(opt.get("strikePrice", 0)) - strike) < 0.01:
+                            sec_id = str(opt.get("securityId", ""))
+                            if sec_id:
+                                log.debug("Dhan option chain resolved security_id",
+                                          segment=dhan_seg, strike=strike,
+                                          opt=opt_type, security_id=sec_id)
+                                return sec_id
+        except Exception as e:
+            log.debug("Dhan option chain resolve failed", error=str(e))
         return None
 
     async def get_order_status(self, broker_order_id: str) -> Dict[str, Any]:
