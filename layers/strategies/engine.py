@@ -757,10 +757,12 @@ class ExecutionEngine:
 
     async def _prime_index_ltps(self) -> None:
         """Fetch index LTPs for all distinct underlyings (NIFTY, SENSEX, ...)
-        so the option auto-resolver has a spot to compute strikes. Uses the
-        Dhan index poll (free for SENSEX; NIFTY has a free Yahoo fallback).
-        Failures are non-fatal — the strategy will just log 'no index LTP
-        yet' until the next tick.
+        so the option auto-resolver has a spot to compute strikes.
+
+        Uses the Dhan index poll (free for SENSEX). For NIFTY a free Yahoo
+        fallback is used (Yahoo has no SENSEX ticker, so SENSEX relies on
+        the Dhan poll). Failures are non-fatal — the strategy will just log
+        'no index LTP yet' until the next tick.
         """
         from layers.state.models import StrategyCatalog
         from sqlalchemy import select, distinct
@@ -772,14 +774,31 @@ class ExecutionEngine:
                 )
                 underlyings = [u for (u,) in result.all() if u]
             for u in underlyings:
-                # Force the Dhan poll path (index LTP) via the feed.
-                spot = await self._feed.get_ltp(f"{u.upper()}|INDEX", symbol=u.upper())
+                spot = await self._fetch_index_ltp(u.upper())
                 if spot:
                     _index_ltp_cache[u.upper()] = (float(spot), time.time())
                     log.debug("Index LTP primed for option auto-resolve",
                               underlying=u, ltp=spot)
         except Exception as e:  # noqa: BLE001
             log.debug("Index LTP priming failed", error=str(e))
+
+    async def _fetch_index_ltp(self, underlying: str) -> Optional[float]:
+        """Fetch the index LTP for an underlying: Dhan poll first, free
+        Yahoo fallback for NIFTY (Yahoo has no SENSEX ticker)."""
+        u = underlying.upper()
+        try:
+            if self._dhan:
+                spot = await self._dhan.get_index_ltp(u)
+                if spot:
+                    return spot
+            # Yahoo fallback (only NIFTY/BANKNIFTY have free Yahoo tickers).
+            if u in ("NIFTY", "BANKNIFTY") and self._dhan:
+                spot = await self._dhan._yahoo_index_ltp(u)
+                if spot:
+                    return spot
+        except Exception as e:  # noqa: BLE001
+            log.debug("Index LTP fetch failed", underlying=u, error=str(e))
+        return None
 
     def _entry_window_open(self) -> bool:
         """True only inside the 09:45:05-13:15:00 IST weekday entry window."""

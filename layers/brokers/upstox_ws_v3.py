@@ -92,7 +92,9 @@ class UpstoxWSV3:
         )
         # The SDK's __init__ sets self.feeder=None; the feeder is only created
         # on connect(). Our patched connect() builds it, so create it up front
-        # to avoid a NoneType reference before the first connect.
+        # to avoid a NoneType reference before the first connect. Use the
+        # streamer's real callback methods (handle_open/message/error/close)
+        # that the SDK's own connect() would attach.
         try:
             from upstox_client.feeder.market_data_feeder_v3 import MarketDataFeederV3
             if self._streamer.feeder is None:
@@ -100,10 +102,10 @@ class UpstoxWSV3:
                     api_client=api_client,
                     instrumentKeys=instrument_keys,
                     mode=mode,
-                    on_open=self._streamer.on_open,
-                    on_message=self._streamer.on_message,
-                    on_error=self._streamer.on_error,
-                    on_close=self._streamer.on_close,
+                    on_open=self._streamer.handle_open,
+                    on_message=self._streamer.handle_message,
+                    on_error=self._streamer.handle_error,
+                    on_close=self._streamer.handle_close,
                 )
         except Exception as e:  # noqa: BLE001
             log.warning("Upstox WS feeder pre-init failed (will be created on connect)",
@@ -380,6 +382,23 @@ class UpstoxWSV3:
 
         def _connect_patched(self):
             feeder = self.feeder
+            if feeder is None:
+                # First call (feeder not yet created by our pre-init) —
+                # build it here with the streamer's real callback methods.
+                from upstox_client.feeder.market_data_feeder_v3 import MarketDataFeederV3
+                feeder = MarketDataFeederV3(
+                    api_client=self.api_client,
+                    instrumentKeys=self.instrumentKeys,
+                    mode=self.mode,
+                    on_open=self.handle_open,
+                    on_message=self.handle_message,
+                    on_error=self.handle_error,
+                    on_close=self.handle_close,
+                )
+                self.feeder = feeder
+            if not feeder:
+                log.error("Upstox WS feeder unavailable — cannot start feed")
+                return
             ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
             auth = self.api_client.configuration.auth_settings().get("OAUTH2", {}).get("value", "")
             headers = {"Authorization": auth, "Accept": "*/*"}
@@ -393,10 +412,10 @@ class UpstoxWSV3:
             feeder.ws = _ws.WebSocketApp(
                 target,
                 header=headers,
-                on_open=self.on_open,
-                on_message=self.on_message,
-                on_error=self.on_error,
-                on_close=self.on_close,
+                on_open=feeder.on_open,
+                on_message=feeder.on_message,
+                on_error=feeder.on_error,
+                on_close=feeder.on_close,
             )
             threading.Thread(target=feeder.ws.run_forever, kwargs={"sslopt": sslopt}).start()
 
