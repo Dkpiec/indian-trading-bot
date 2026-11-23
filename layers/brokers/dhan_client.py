@@ -36,7 +36,7 @@ class DhanClient(BrokerBase):
 
     async def get_balance(self) -> BalanceSnapshot:
         url = f"{DHAN_BASE}/fundlimit"
-        resp = await self._http.get(url, headers=self._headers())
+        resp = await self._http.post(url, json={}, headers=self._headers())
         if resp.status_code != 200:
             raise RuntimeError(f"Dhan balance failed: {resp.status_code} {resp.text}")
         data = resp.json()
