@@ -118,9 +118,15 @@ class DhanClient(BrokerBase):
                 items = resp.json().get("data", {}).get("data", [])
                 if items:
                     last = items[0].get("lastPrice")
-                    return float(last) if last else None
+                    if last:
+                        return float(last)
+                log.debug("Dhan index LTP empty response", symbol=symbol,
+                          status=resp.status_code, body=str(resp.text)[:200])
+            else:
+                log.warning("Dhan index LTP HTTP error", symbol=symbol,
+                            status=resp.status_code, body=str(resp.text)[:200])
         except Exception as e:
-            log.debug("Dhan index LTP poll failed", symbol=symbol, error=str(e))
+            log.warning("Dhan index LTP poll failed", symbol=symbol, error=str(e))
         return None
 
     async def get_option_ltp(self, symbol: str, security_id: str = "") -> Optional[float]:
