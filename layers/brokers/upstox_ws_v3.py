@@ -453,37 +453,33 @@ class UpstoxWSV3:
                 log.error("Upstox WS feeder unavailable — cannot start feed")
                 return
             auth = self.api_client.configuration.auth_settings().get("OAUTH2", {}).get("value", "")
-            # Primary: call the /authorize REST endpoint for a fresh single-use
-            # wss:// URL. This avoids the 302-redirect race that causes 403s
-            # when stale session tokens are reused across reconnects.
-            target = _resolve_via_authorize(auth)
-            if not target:
-                # Fallback: follow the 302 redirect from the feed endpoint.
-                log.warning("Upstox v3 WS authorize endpoint unavailable — "
-                            "falling back to 302 redirect")
-                ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
-                headers = {"Authorization": auth, "Accept": "*/*"}
-                target = _resolve(ws_url, headers, force=True)
-            resolved_url["url"] = target
             if feeder.ws and feeder.ws.sock:
                 return
             headers = {"Authorization": auth, "Accept": "*/*"}
             sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
-            # websocket-client's WebSocketApp.run_forever() does NOT follow
-            # ws->wss or cross-host 3xx redirects — so we hand it the final
-            # resolved target (from the authorize endpoint or the one 302
-            # follow above) and let it open straight to it.
+            # Per the Upstox V3 docs: "Ensure that your WebSocket client is
+            # configured to handle automatic redirection to the authorized
+            # endpoint after authentication." websocket-client follows 3xx
+            # redirects in the SAME TLS session (redirect_limit default=3),
+            # which is exactly what the docs require. The ?r= token in the
+            # 302 Location header is bound to the TLS session that generated
+            # it, so a separate raw-socket handshake (our old _resolve) broke
+            # that binding and got 403 on the wsfeeder-api target.
+            ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
+            log.info("Upstox v3 WS connecting (native redirect follow)", target=ws_url)
             feeder.ws = _ws.WebSocketApp(
-                target,
+                ws_url,
                 header=headers,
                 on_open=feeder.on_open,
                 on_message=feeder.on_message,
                 on_error=feeder.on_error,
                 on_close=feeder.on_close,
             )
-            threading.Thread(target=feeder.ws.run_forever,
-                             kwargs={"sslopt": sslopt, "enable_multithread": False,
-                                     "max_size": 0}).start()
+            threading.Thread(
+                target=feeder.ws.run_forever,
+                kwargs={"sslopt": sslopt, "enable_multithread": False,
+                        "max_size": 0},
+            ).start()
 
         streamer.connect = _connect_patched.__get__(streamer, type(streamer))
         log.debug("Upstox v3 WS feed redirect patch applied")
