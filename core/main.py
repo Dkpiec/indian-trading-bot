@@ -299,12 +299,30 @@ def create_app() -> FastAPI:
     # Health endpoint
     @app.get("/health")
     async def health():
+        db_status = "unavailable"
+        if _db_available and engine:
+            try:
+                from sqlalchemy import text
+                async with engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+                db_status = "connected"
+            except Exception:
+                db_status = "unavailable"
+        
+        redis_status = "unavailable"
+        if _redis_pool and _redis_pool is not False:
+            try:
+                await _redis_pool.ping()
+                redis_status = "connected"
+            except Exception:
+                redis_status = "unavailable"
+        
         return {
             "status": "ok",
             "version": "4.0.0",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "database": "connected" if _db_available else "unavailable",
-            "redis": "connected" if _redis_pool and _redis_pool is not False else "unavailable",
+            "database": db_status,
+            "redis": redis_status,
         }
     
     # Status endpoint (was missing)
