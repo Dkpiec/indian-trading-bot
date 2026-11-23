@@ -81,9 +81,11 @@ class BotManager:
     def set_dhan_client(self, dhan_client) -> None:
         """Late-bind the Dhan client once the broker layer is ready.
 
-        The bot is constructed BEFORE the Dhan client exists, so the initial
-        assignment can be None. Callers that start the broker later must
-        re-bind via this method or /balance will report 'client not available'.
+        The bot is constructed before the broker layer has finished
+        initialising in every deployment we've seen, so the initial
+        reference is typically None. Call this as soon as the broker
+        layer is available; subsequent /balance, /forceexit and
+        /tokenstatus commands will use the bound client.
         """
         self._app_state_dhan_client = dhan_client
 
