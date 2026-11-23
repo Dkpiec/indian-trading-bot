@@ -398,6 +398,7 @@ class UpstoxWSV3:
             called fresh on every connect(). Returns None on failure.
             """
             import urllib.request
+            import urllib.error
             url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
             req = urllib.request.Request(
                 url,
@@ -417,6 +418,16 @@ class UpstoxWSV3:
                         return uri
                 log.warning("Upstox v3 WS authorize endpoint returned no URI",
                             body=body)
+            except urllib.error.HTTPError as e:
+                # Log the HTTP status + body so 403/401 entitlement issues
+                # are visible without digging through the raw exception.
+                err_body = ""
+                try:
+                    err_body = e.read().decode(errors="replace")[:300]
+                except Exception:  # noqa: BLE001
+                    pass
+                log.warning("Upstox v3 WS authorize endpoint HTTP error",
+                            status=e.code, body=err_body)
             except Exception as e:  # noqa: BLE001
                 log.warning("Upstox v3 WS authorize endpoint failed",
                             error=str(e))
@@ -458,6 +469,10 @@ class UpstoxWSV3:
                 return
             headers = {"Authorization": auth, "Accept": "*/*"}
             sslopt = {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}
+            # websocket-client's WebSocketApp.run_forever() does NOT follow
+            # ws->wss or cross-host 3xx redirects — so we hand it the final
+            # resolved target (from the authorize endpoint or the one 302
+            # follow above) and let it open straight to it.
             feeder.ws = _ws.WebSocketApp(
                 target,
                 header=headers,
@@ -466,7 +481,9 @@ class UpstoxWSV3:
                 on_error=feeder.on_error,
                 on_close=feeder.on_close,
             )
-            threading.Thread(target=feeder.ws.run_forever, kwargs={"sslopt": sslopt}).start()
+            threading.Thread(target=feeder.ws.run_forever,
+                             kwargs={"sslopt": sslopt, "enable_multithread": False,
+                                     "max_size": 0}).start()
 
         streamer.connect = _connect_patched.__get__(streamer, type(streamer))
         log.debug("Upstox v3 WS feed redirect patch applied")

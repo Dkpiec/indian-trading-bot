@@ -58,10 +58,27 @@ class MarketDataFeed:
     async def _maybe_reconnect_ws(self) -> None:
         """Drive a WS reconnect when the feed is running but has gone stale
         (the 'socket is already closed' flap). Reconnect at most once every
-        60s and only if the socket was healthy recently, so we don't hammer
-        the endpoint on a persistent network outage."""
+        60s and only if the socket was unhealthy for >= 30s, so we don't
+        hammer the endpoint on a persistent network outage.
+
+        Also recovers from ws_close/ws_error events: when the Upstox WS
+        adapter sets _running=False (close/error), _ws_running here still
+        says the feed is up — we re-issue start() to get a fresh socket +
+        subscription, which restores the WS as the primary LTP source
+        within one tick cycle (~5s) instead of falling back to Dhan."""
         ws = self._upstox_ws
-        if not ws or not self._ws_running:
+        if not ws:
+            return
+        # Case 1: the WS adapter itself reports it is no longer running
+        # (socket closed or errored out). Re-start immediately.
+        if self._ws_running and not getattr(ws, "_running", False):
+            log.warning("Upstox WS adapter stopped — restarting feed",
+                        instruments=len(self._ws_subscribed))
+            self._ws_running = False
+            self._ws_unhealthy_ts = 0.0
+            await self.start(list(self._ws_subscribed))
+            return
+        if not self._ws_running:
             return
         if getattr(ws, "healthy", None) and ws.healthy():
             self._ws_unhealthy_ts = 0.0
@@ -164,10 +181,18 @@ class MarketDataFeed:
             async for tick in self._upstox_ws.ticks():
                 ttype = tick.get("type", "tick")
                 if ttype in ("ws_close", "ws_error"):
-                    log.warning("Upstox WS closed/error — falling back to Dhan",
+                    # The socket closed or errored. The UpstoxWSV3 adapter
+                    # sets _running=False in its close/error callback. The
+                    # next _maybe_reconnect_ws() call (every tick cycle)
+                    # sees the adapter stopped and re-issues start() for a
+                    # fresh socket + re-subscription — keeping the WS as the
+                    # primary LTP source instead of parking on the Dhan poll.
+                    log.warning("Upstox WS closed/error — restart on next tick",
                                 code=tick.get("code"), error=tick.get("error"))
                     self._ws_running = False
                     self._ws_unhealthy_ts = 0.0
+                    continue
+                if ttype == "ws_open":
                     continue
                 key = tick.get("instrument_key", "")
                 ltp = tick.get("last_price")
