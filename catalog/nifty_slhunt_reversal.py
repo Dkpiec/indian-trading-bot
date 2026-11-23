@@ -151,10 +151,10 @@ class StrategyPlugin:
         plugin class serves both legs without code duplication.
         """
         cfg = self._cfg
-        open_v, close_v = self._open_and_close(params, state)
-        if close_v <= 0 or open_v <= 0:
+        or_low, or_high = self._open_and_close(params, state)
+        if or_low <= 0 or or_high <= 0:
             return None
-        om = (close_v + open_v) / 2.0
+        om = (or_high + or_low) / 2.0
 
         # Determine which leg this instance trades (CE or PE).
         opt_type = str(params.get("option_type") or "CE").upper()
@@ -180,27 +180,27 @@ class StrategyPlugin:
         rej = float(cfg.get("rej") or 0.20)
 
         # CE leg: sweep of or_high (low dipped below, close back above).
-        if opt_type == "CE" and c > close_v and l < close_v:
-            sweep_wick = close_v - l
+        if opt_type == "CE" and c > or_high and l < or_high:
+            sweep_wick = or_high - l
             if sweep_wick >= wick and c >= om:
                 return {
                     "action": "ENTRY",
                     "side": "BUY",
                     "reason": (
-                        f"SLHUNT: NIFTY 5m bar swept or_high {close_v:.2f} "
+                        f"SLHUNT: NIFTY 5m bar swept or_high {or_high:.2f} "
                         f"(low {l:.2f}, wick {sweep_wick:.1f}pt) and closed "
                         f"back at {c:.2f} > om {om:.2f} — enter weekly CE"
                     ),
                 }
         # PE leg: sweep of or_low (high poked above, close back below).
-        if opt_type == "PE" and c < open_v and h > open_v:
-            sweep_wick = h - open_v
+        if opt_type == "PE" and c < or_low and h > or_low:
+            sweep_wick = h - or_low
             if sweep_wick >= wick and c <= om:
                 return {
                     "action": "ENTRY",
                     "side": "BUY",
                     "reason": (
-                        f"SLHUNT: NIFTY 5m bar swept or_low {open_v:.2f} "
+                        f"SLHUNT: NIFTY 5m bar swept or_low {or_low:.2f} "
                         f"(high {h:.2f}, wick {sweep_wick:.1f}pt) and closed "
                         f"back at {c:.2f} < om {om:.2f} — enter weekly PE"
                     ),
@@ -276,7 +276,8 @@ class StrategyPlugin:
                 "reason": f"SLHUNT: time stop (held {bars_held} bars >= {hold})",
             }
         # EOD: close before 15:00 IST.
-        now_ist = datetime.now(timezone.utc)
+        from zoneinfo import ZoneInfo
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
         if now_ist.hour * 60 + now_ist.minute >= (15 * 60):
             return {
                 "action": "EXIT",

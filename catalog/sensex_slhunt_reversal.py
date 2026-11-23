@@ -170,10 +170,10 @@ class StrategyPlugin:
         plugin class serves both legs without code duplication.
         """
         cfg = self._cfg
-        open_v, close_v = self._open_and_close(params, state)
-        if close_v <= 0 or open_v <= 0:
+        or_low, or_high = self._open_and_close(params, state)
+        if or_low <= 0 or or_high <= 0:
             return None
-        om = (close_v + open_v) / 2.0
+        om = (or_high + or_low) / 2.0
 
         # Determine which leg this instance trades (CE or PE).
         opt_type = str(params.get("option_type") or "CE").upper()
@@ -199,11 +199,11 @@ class StrategyPlugin:
         rej = float(cfg.get("rej") or 0.45)
 
         # CE leg: sweep of or_high (low dipped below, close back above).
-        if opt_type == "CE" and c > close_v and l < close_v:
-            sweep_wick = close_v - l
+        if opt_type == "CE" and c > or_high and l < or_high:
+            sweep_wick = or_high - l
             if sweep_wick >= wick:
                 # Rejection depth check: close must reject back by rej * sweep_wick
-                rec = close_v - c
+                rec = c - l
                 if rec >= rej * sweep_wick and c >= om:
                     return {
                         "action": "ENTRY",
@@ -211,16 +211,16 @@ class StrategyPlugin:
                         "qty": int(cfg.get("lot") or 40),
                         "tp1_qty": int((cfg.get("lot") or 40) * (cfg.get("tp1_frac") or 0.5)),
                         "reason": (
-                            f"SLHUNT: SENSEX 5m bar swept or_high {close_v:.2f} "
+                            f"SLHUNT: SENSEX 5m bar swept or_high {or_high:.2f} "
                             f"(low {l:.2f}, wick {sweep_wick:.1f}pt, rej {rec:.1f}pt) "
                             f"and closed back at {c:.2f} > om {om:.2f} — enter SENSEX CE"
                         ),
                     }
         # PE leg: sweep of or_low (high poked above, close back below).
-        if opt_type == "PE" and c < open_v and h > open_v:
-            sweep_wick = h - open_v
+        if opt_type == "PE" and c < or_low and h > or_low:
+            sweep_wick = h - or_low
             if sweep_wick >= wick:
-                rec = c - open_v
+                rec = h - c
                 if rec >= rej * sweep_wick and c <= om:
                     return {
                         "action": "ENTRY",
@@ -228,7 +228,7 @@ class StrategyPlugin:
                         "qty": int(cfg.get("lot") or 40),
                         "tp1_qty": int((cfg.get("lot") or 40) * (cfg.get("tp1_frac") or 0.5)),
                         "reason": (
-                            f"SLHUNT: SENSEX 5m bar swept or_low {open_v:.2f} "
+                            f"SLHUNT: SENSEX 5m bar swept or_low {or_low:.2f} "
                             f"(high {h:.2f}, wick {sweep_wick:.1f}pt, rej {rec:.1f}pt) "
                             f"and closed back at {c:.2f} < om {om:.2f} — enter SENSEX PE"
                         ),
@@ -328,10 +328,9 @@ class StrategyPlugin:
             }
 
         # EOD: close before 15:30 IST.
-        now_ist = datetime.now(timezone.utc)
-        ist_hour = (now_ist.hour + 5) % 24  # UTC+05:30 approximation
-        ist_minute = now_ist.minute
-        if ist_hour * 60 + ist_minute >= (15 * 60 + 30):
+        from zoneinfo import ZoneInfo
+        now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+        if now_ist.hour * 60 + now_ist.minute >= (15 * 60 + 30):
             return {
                 "action": "EXIT",
                 "side": "SELL",
