@@ -910,17 +910,19 @@ async def cmd_forceexit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show market status: open/closed, entry window, time to open/close."""
+    if not update.message:
+        return
+
     from datetime import datetime as dt, timezone as tz, timedelta
     from core.config import settings
 
     ist = tz(timedelta(hours=5, minutes=30))
     now_ist = dt.now(ist)
-    hhmm = now_ist.strftime("%H:%M")
 
-    open_hhmm = settings.market_open  # "09:15"
-    close_hhmm = settings.market_close  # "15:30"
-    entry_start = settings.entry_window_start  # "09:45"
-    entry_end = settings.entry_window_end  # "13:15"
+    open_hhmm = settings.market_open
+    close_hhmm = settings.market_close
+    entry_start = settings.entry_window_start
+    entry_end = settings.entry_window_end
 
     open_h, open_m = map(int, open_hhmm.split(":"))
     close_h, close_m = map(int, close_hhmm.split(":"))
@@ -930,7 +932,6 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     market_open = (open_h * 60 + open_m) <= (now_ist.hour * 60 + now_ist.minute) < (close_h * 60 + close_m)
     entry_open = (es_h * 60 + es_m) <= (now_ist.hour * 60 + now_ist.minute) < (ee_h * 60 + ee_m)
 
-    # Calculate time to next event
     current_min = now_ist.hour * 60 + now_ist.minute
     open_min = open_h * 60 + open_m
     close_min = close_h * 60 + close_m
@@ -964,18 +965,26 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         entry_detail = f"closes in {ee_min - current_min}m"
 
     lines = [
-        f"📊 *Market Status* — {now_ist.strftime('%a %d %b %Y %H:%M IST')}",
+        "📊 Market Status",
         "",
-        f"{status_icon} *{status_text}* ({open_hhmm}–{close_hhmm} IST) — {next_event}",
-        f"{entry_icon} *{entry_text}* ({entry_start}–{entry_end}) — {entry_detail}",
+        f"{now_ist.strftime('%a %d %b %Y %H:%M IST')}",
+        "",
+        f"{status_icon} {status_text} ({open_hhmm}–{close_hhmm} IST)",
+        f"   → {next_event}",
+        "",
+        f"{entry_icon} {entry_text} ({entry_start}–{entry_end})",
+        f"   → {entry_detail}",
         "",
         "Weekend: closed",
     ]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show current bot settings: broker, risk limit, market hours."""
+    if not update.message:
+        return
+
     user_id = context.user_data["user_id"]
     uid = _parse_user_id(user_id)
     bot_mgr = context.bot_data["bot_manager"]
@@ -985,12 +994,10 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     broker_status = "✅ DhanHQ connected" if dhan_client else "❌ DhanHQ not available"
 
     upstox_ok = bool(getattr(settings, "upstox_access_token", None))
-    upstox_status = "✅ Upstox configured" if upstox_ok else "❌ Upstox not configured"
 
     session_ctx = await _get_session(bot_mgr)
     async with session_ctx as session:
         if session is None:
-            floor_pct = 0.20
             risk_line = "💳 Floor: 20% (default, DB unavailable)"
         else:
             risk_result = await session.execute(
@@ -1001,13 +1008,12 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 floor_pct = risk.balance_floor_pct
                 risk_line = f"💳 Floor: {floor_pct*100:.0f}% | Max position: ₹{(risk.max_position_value or 0):,.0f}"
             else:
-                floor_pct = 0.20
                 risk_line = "💳 Floor: 20% (default)"
 
     lines = [
-        "⚙️ *Bot Settings*",
+        "⚙️ Bot Settings",
         "",
-        f"{broker_status}",
+        broker_status,
         f"{'✅' if upstox_ok else '❌'} Upstox: {'configured' if upstox_ok else 'not configured'}",
         "",
         f"📈 Market hours: {settings.market_open}–{settings.market_close} IST",
@@ -1015,29 +1021,32 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "",
         risk_line,
     ]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show bot version, build info, and uptime."""
-    import os, time
-    from core.config import settings
+    if not update.message:
+        return
+
+    import os, datetime
 
     version = "4.0.0"
     started_at = os.environ.get("BOT_START_TIME", "unknown")
+    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
-        "🐍 *Indian Trading Bot*",
+        "🐍 Indian Trading Bot",
         "",
         f"Version: v{version}",
         f"Build: {os.environ.get('BUILD_COMMIT', 'unknown')}",
-        f"Python: {time.strftime('%Y.%m.%d')}",
+        f"Uptime: {now_str}",
         "",
         "Stack: FastAPI + asyncpg + Redis + Alembic",
         "Broker: DhanHQ (REST v2)",
         "Market: NSE Options (NSE_FNO)",
     ]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1069,6 +1078,9 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show active alert notifications and toggle them."""
+    if not update.message:
+        return
+
     user_id = context.user_data["user_id"]
     uid = _parse_user_id(user_id)
     bot_mgr = context.bot_data["bot_manager"]
@@ -1077,7 +1089,7 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     async with session_ctx as session:
         if session is None:
             await update.message.reply_text(
-                "🔔 *Alerts* (DB unavailable)\n\n"
+                "🔔 Alerts (DB unavailable)\n\n"
                 "Default alerts enabled:\n"
                 "• Position opened/closed\n"
                 "• P&L threshold crossed\n"
@@ -1086,7 +1098,7 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
     alert_lines = [
-        "🔔 *Alert Notifications*",
+        "🔔 Alert Notifications",
         "",
         "• 🟢 Position opened — signal triggered",
         "• 🔴 Position closed — exit executed",
@@ -1096,7 +1108,7 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "",
         "To disable: /alerts off",
     ]
-    await update.message.reply_text("\n".join(alert_lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(alert_lines))
 
 
 SUPPORTED_BROKERS = {
