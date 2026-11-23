@@ -325,7 +325,14 @@ async def lifespan(app: FastAPI):
 
     tg_token = settings.trading_telegram_bot_token
     tg_chat = settings.telegram_chat_id
-    if tg_token and tg_chat:
+    # Two apps (V0 engine + ITB app) share this token in production. Only ONE may
+    # run the interactive Telegram command poller, or they fight over the bot's
+    # update stream with HTTP 409 and commands silently stop being answered.
+    # The V0 engine owns the interactive bot; ITB disables its poller unless
+    # explicitly opted in with TRADING_BOT_POLLING=1 (ITB still serves /api/v1/*).
+    import os as _os
+    poll_enabled = _os.environ.get("TRADING_BOT_POLLING", "0") == "1"
+    if tg_token and tg_chat and poll_enabled:
         try:
             await bot_manager.start_bot(
                 user_id="system",
@@ -335,6 +342,9 @@ async def lifespan(app: FastAPI):
             log.info("Telegram trading bot started", chat_id=tg_chat)
         except Exception as e:
             log.error("Telegram bot start failed", error=str(e))
+    elif tg_token and tg_chat:
+        log.info("TRADING_BOT_POLLING unset — interactive bot poller disabled "
+                 "(V0 engine owns this token's update stream). REST /api/v1/* still live.")
     else:
         log.warning("TRADING_TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — bot disabled")
 
