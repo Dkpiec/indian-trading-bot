@@ -128,9 +128,20 @@ class DhanClient(BrokerBase):
         return await self._yahoo_index_ltp(symbol)
 
     async def _dhan_index_ltp(self, symbol: str) -> Optional[float]:
-        """Dhan /v2/quotes index poll (free, not historical data)."""
-        # Dhan index security IDs (public constants from the Dhan v2 API docs)
-        index_ids = {"NIFTY": "mid3101", "SENSEX": "mid3040"}
+        """Dhan /v2/marketfeed/ltp index poll (free, not historical data).
+
+        Dhan v2 index security IDs (plain integers, segment IDX_I):
+          NIFTY     → IDX_I, sid 13
+          SENSEX    → IDX_I, sid 51
+          BANKNIFTY → IDX_I, sid 25
+
+        The old v1 API used 'mid3101'/'mid3040' with segment 'INDEX'.
+        """
+        index_ids = {
+            "NIFTY": 13,
+            "SENSEX": 51,
+            "BANKNIFTY": 25,
+        }
         code = symbol.upper()
         for suffix in ("_CE_PE", "_PE", "_CE"):
             code = code.replace(suffix, "")
@@ -143,25 +154,21 @@ class DhanClient(BrokerBase):
         if not sid:
             return None
         try:
-            # Dhan v2 live-quote endpoint (free, not historical data).
-            # Endpoint is POST /v2/quotes (not /market/quote) — the latter
-            # 404s, which is why the SENSEX index poll kept failing.
-            url = f"{DHAN_BASE}/quotes"
-            payload = {"securityId": sid, "exchangeSegment": "INDEX"}
-            resp = await self._http.post(url, json=payload, headers=self._headers())
+            url = f"{DHAN_BASE}/marketfeed/ltp"
+            payload = {"IDX_I": [sid]}
+            resp = await self._http.post(
+                url, json=payload,
+                headers=self._headers(),
+            )
             if resp.status_code == 200:
                 body = resp.json()
-                # Dhan v2 /quotes returns data.data[] (list of quotes). Some
-                # versions return data as a dict keyed by security_id — handle
-                # both.
-                inner = body.get("data", {})
-                items = inner.get("data", []) if isinstance(inner, dict) else []
-                if not items and isinstance(inner, dict):
-                    items = [v for v in inner.values() if isinstance(v, dict)]
-                if items:
-                    last = items[0].get("lastPrice")
-                    if last:
-                        return float(last)
+                data = body.get("data", {})
+                for seg_key, items in data.items():
+                    if isinstance(items, dict):
+                        for _sid, quote in items.items():
+                            lp = quote.get("last_price")
+                            if lp:
+                                return float(lp)
                 log.debug("Dhan index LTP empty response", symbol=symbol,
                           status=resp.status_code, body=str(body)[:200])
             else:

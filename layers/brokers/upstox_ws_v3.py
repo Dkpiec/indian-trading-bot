@@ -401,7 +401,10 @@ class UpstoxWSV3:
             url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
             req = urllib.request.Request(
                 url,
-                headers={"Authorization": auth, "Accept": "application/json"},
+                headers={
+                    "Authorization": auth,
+                    "Accept": "application/json",
+                },
                 method="GET",
             )
             try:
