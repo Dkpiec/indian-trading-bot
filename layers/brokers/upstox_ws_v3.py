@@ -148,8 +148,16 @@ class UpstoxWSV3:
                 break
             await asyncio.sleep(0.5)
         else:
-            log.error("Upstox v3 WS did not open within 10s — retrying once")
+            # Socket didn't open within 10s. The ?r= token from /authorize
+            # may have expired — re-resolve and reconnect ONCE.
+            log.error("Upstox v3 WS did not open within 10s — re-resolving and retrying")
             try:
+                # Close the orphaned WebSocketApp thread (if it started).
+                if feeder and getattr(feeder, "ws", None) and getattr(feeder.ws, "sock", None):
+                    try:
+                        feeder.ws.sock.close()
+                    except Exception:
+                        pass
                 self._streamer.connect()
                 await asyncio.sleep(3)
             except Exception as e:
@@ -159,20 +167,21 @@ class UpstoxWSV3:
         # but if the socket wasn't ready at that moment the subscribe raises
         # "WebSocket is not open." and is silently swallowed by
         # websocket-client. This explicit call guarantees the keys are sent
-        # once the socket is confirmed open. Retry a few times because the
-        # SDK's on_open can fire on a transient socket that immediately
-        # closes (the "socket is already closed" race we saw in production).
+        # once the socket is confirmed open.
+        #
+        # NOTE: we do NOT re-call connect() in the subscribe retry loop —
+        # that re-resolves the /authorize URL (fresh ?r= token) and orphans
+        # the in-flight WebSocketApp thread, causing the 403 storm. Instead,
+        # we just wait for the socket to open and try the subscribe.
         feeder = self._streamer.feeder
         subscribed = False
         for attempt in range(6):
             if not (feeder and feeder.ws and feeder.ws.sock):
-                # Socket dropped (or never opened) — ask the SDK to reconnect
-                # and give it a moment to bring the socket back up.
-                try:
-                    self._streamer.connect()
-                except Exception as e:
-                    log.warning("Upstox v3 WS reconnect (pre-sub) error", error=str(e))
-                await asyncio.sleep(1.5)
+                # Socket not open yet — give the in-flight run_forever thread
+                # time to complete the handshake (redirect + ?r= validation).
+                log.debug("Upstox v3 WS socket not open yet, waiting",
+                          attempt=attempt + 1)
+                await asyncio.sleep(2.0)
                 feeder = self._streamer.feeder
                 continue
             try:
