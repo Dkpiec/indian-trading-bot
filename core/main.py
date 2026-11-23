@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from core.config import settings
-from core.security import MasterCredentialRouter
+from core.security import MasterCredentialRouter, set_insecure_default_jwt_secret
 
 log = structlog.get_logger(__name__)
 
@@ -120,6 +120,19 @@ cred_router = None
 async def lifespan(app: FastAPI):
     """Startup/shutdown hooks."""
     log.info("Indian Trading Bot starting", version="4.0.0")
+
+    # Refuse to serve admin APIs with the default JWT secret: anyone who
+    # knows "change-me-in-production" (it ships in the repo) can forge
+    # master tokens. The bot still runs its execution loop; auth-protected
+    # endpoints 401/403 until JWT_SECRET is set via env.
+    if settings.jwt_secret == "change-me-in-production":
+        log.warning(
+            "JWT_SECRET is the insecure default — master admin endpoints are "
+            "disabled until JWT_SECRET is set via env"
+        )
+        set_insecure_default_jwt_secret(True)
+    else:
+        set_insecure_default_jwt_secret(False)
 
     # Initialize database (async-safe)
     global cred_router

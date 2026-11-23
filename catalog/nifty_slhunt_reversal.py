@@ -33,6 +33,8 @@ uses option_type=CE with trigger_type=SLHUNT so it is a distinct leg.
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -59,36 +61,61 @@ YAHOO_5M_URL = (
     "?interval=5m&range=1d"
 )
 
+# Candles are re-fetched at most once every 55s, in a background thread,
+# so the 1s tick loop never blocks on the Yahoo download and never
+# hammers the endpoint (a 5m bar updates at most every 5 minutes).
+_candles_cache: Dict[str, Any] = {"ts": 0.0, "candles": []}
+_candles_lock = threading.Lock()
+_CANDLES_REFRESH_S = 55.0
+_candles_refresh_in_flight = threading.Event()
+
 
 def _fetch_nifty_5m_candles() -> list:
     """Return [(ts_epoch, open, high, low, close)] for today's ^NSEI 5m bars.
 
     Uses the free Yahoo v8 chart API — the same source the ORB arm script
     uses, so the engine and the arming logic never disagree about the
-    opening range. Returns [] on any network/parse failure.
+    opening range. Returns the last good cache (possibly []) on failure.
+    The refresh is at most one background download per 55s; the caller
+    (the 1s tick loop) never blocks on the network.
     """
-    try:
-        req = urllib.request.Request(YAHOO_5M_URL, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-        result = (data.get("chart", {}).get("result") or [None])[0]
-        if not result:
-            return []
-        ts = result.get("timestamp") or []
-        q = result.get("indicators", {}).get("quote", [None])[0]
-        if not q:
-            return []
-        o = q.get("open") or []
-        h = q.get("high") or []
-        l = q.get("low") or []
-        c = q.get("close") or []
-        out = []
-        for i in range(len(ts)):
-            if all(v is not None for v in (ts[i], o[i], h[i], l[i], c[i])):
-                out.append((ts[i], float(o[i]), float(h[i]), float(l[i]), float(c[i])))
-        return out
-    except Exception:
-        return []
+    now = time.time()
+    with _candles_lock:
+        need_refresh = (
+            now - _candles_cache["ts"] >= _CANDLES_REFRESH_S
+            and not _candles_refresh_in_flight.is_set()
+        )
+        if need_refresh:
+            _candles_refresh_in_flight.set()
+
+    if need_refresh:
+        def _refresh() -> None:
+            try:
+                req = urllib.request.Request(YAHOO_5M_URL, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                result = (data.get("chart", {}).get("result") or [None])[0]
+                candles = []
+                if result:
+                    ts = result.get("timestamp") or []
+                    q = (result.get("indicators", {}).get("quote") or [None])[0]
+                    if q:
+                        o, h, l, c = q.get("open") or [], q.get("high") or [], q.get("low") or [], q.get("close") or []
+                        for i in range(len(ts)):
+                            if all(v is not None for v in (ts[i], o[i], h[i], l[i], c[i])):
+                                candles.append((ts[i], float(o[i]), float(h[i]), float(l[i]), float(c[i])))
+                if candles:
+                    with _candles_lock:
+                        _candles_cache["ts"] = time.time()
+                        _candles_cache["candles"] = candles
+            except Exception:
+                pass  # keep the previous cache; the next tick retries
+            finally:
+                _candles_refresh_in_flight.clear()
+        threading.Thread(target=_refresh, daemon=True, name="nifty-slhunt-candles").start()
+
+    with _candles_lock:
+        return list(_candles_cache["candles"])
 
 
 class StrategyPlugin:

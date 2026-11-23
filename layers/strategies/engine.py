@@ -312,8 +312,13 @@ _instruments_loaded_at: float = 0.0
 _instruments_by_underlying: Dict[tuple, list] = {}
 # Cached auto-resolved option keys: (segment, underlying, option_type) -> instrument_key
 _auto_key_cache: Dict[tuple, str] = {}
-# Cached index LTP used for strike computation: underlying -> (ltp, ts)
+
 _index_ltp_cache: Dict[str, tuple] = {}
+
+# Process-local cache of Dhan option-chain security_id resolutions,
+# keyed by (segment, expiry, strike, option_type). Populated by the
+# engine's async resolver when the arm script has not stored the id.
+_security_id_cache: Dict[tuple, str] = {}
 
 
 def _strike_interval(underlying: str) -> float:
@@ -581,7 +586,9 @@ class ExecutionEngine:
         # can map (segment, expiry, strike, opt_type) -> "SEG|numeric_id"
         # before we collect armed keys. Without this the index is empty and
         # every option key falls back to a readable label the WS server drops.
-        _load_upstox_instruments()
+        # Run in a worker thread: the ~60MB download with a 60s timeout must
+        # not block the event loop (which would stall the whole 1s tick).
+        await asyncio.to_thread(_load_upstox_instruments)
         # Start the WS feed with the instrument keys for all currently armed
         # subscriptions. New keys are re-subscribed on each tick (the
         # _ws_subscribed set in tick() below), so keys that arm later are
@@ -734,6 +741,18 @@ class ExecutionEngine:
             "entry_window_open": self._entry_window_open(),
         }
 
+        # Live index LTP (the spot proxy for OR-range / sweep logic). The old
+        # code left spot_ltp at 0 forever, which silently disabled the ORB
+        # v6e midpoint-invalidation exit and the slhunt spot fallback.
+        underlying_code = (cat.underlying or "NIFTY").upper()
+        spot_cached = _index_ltp_cache.get(underlying_code)
+        if spot_cached:
+            spot_ltp, spot_ts = spot_cached
+            # Use the cached value only while it is fresh (<60s); the index
+            # poll refreshes it every second via the Dhan/Yahoo feed.
+            if time.time() - spot_ts < 60:
+                state["spot_ltp"] = spot_ltp
+
         async with self._session_factory() as session:
             # Load instance if it exists
             result = await session.execute(
@@ -749,15 +768,18 @@ class ExecutionEngine:
                 state["unrealized_pnl"] = inst.unrealized_pnl or 0.0
 
             # Check if a trade was taken today.
-            # Compare the TIMESTAMP column directly to a datetime — never CAST to
-            # date (the Date type collides with the DB column type name and breaks
-            # the query). The 00:00 start of day is the correct boundary in IST.
+            # TradeOrderLedger.created_at is stored in UTC (Postgres
+            # timestamptz via asyncpg). Compare against IST midnight converted
+            # to UTC — the old code used an IST-aware boundary, so the
+            # "one trade per day" guard misfired 00:00-05:30 IST.
             from sqlalchemy import func as _func
-            today_start = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start_utc = datetime.now(IST).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).astimezone(timezone.utc)
             result = await session.execute(
                 select(_func.count()).where(
                     TradeOrderLedger.instance_id == instance_id,
-                    TradeOrderLedger.created_at >= today_start,
+                    TradeOrderLedger.created_at >= today_start_utc,
                     TradeOrderLedger.status == "FILLED",
                     TradeOrderLedger.side == "BUY",
                 )
@@ -894,25 +916,25 @@ class ExecutionEngine:
         from layers.state.models import StrategyInstance, TradeOrderLedger
         from sqlalchemy import select
 
-        # Balance gate check.
-        # The floor gates NEW entries against a minimum free-balance buffer.
-        # floor = free_balance * floor_pct (e.g. 20% of available margin kept
-        # as buffer). Block only when free_balance < floor (i.e. the position
-        # would consume more than (1 - floor_pct) of available free margin).
-        # This is a soft pre-check; Dhan's own margin validation at the broker
-        # is the authoritative gate.
+        # Balance gate: keep >= floor_pct of TOTAL EQUITY (free + used) as a
+        # margin buffer. The buffer protects against margin-call death
+        # spirals, so it is a fraction of total_equity, not of free_balance
+        # (free < free*0.2 was unreachable and never blocked anything).
         if self._dhan:
             try:
                 balance = await self._dhan.get_balance()
+                total_equity = balance.total_equity
                 free_balance = balance.free_balance
-                floor = free_balance * self._floor_pct
-                if free_balance < floor:
-                    # Mathematically floor < free_balance always (floor is a
-                    # fraction of free_balance), so this block is unreachable
-                    # unless free_balance <= 0 (account empty).
+                floor = total_equity * self._floor_pct
+                if total_equity > 0 and free_balance < floor:
+                    # Insufficient margin buffer above the floor — block the
+                    # entry and let the operator /telegram adjust.
                     log.warning(
-                        "Entry blocked: free balance at or below zero",
-                        free=free_balance,
+                        "Entry blocked: free balance below margin floor",
+                        free=round(free_balance, 2),
+                        floor=round(floor, 2),
+                        total=round(total_equity, 2),
+                        floor_pct=self._floor_pct,
                         catalog_id=cat.id,
                     )
                     return
@@ -936,6 +958,18 @@ class ExecutionEngine:
         # Place the order via Dhan
         symbol = self._get_symbol(cat)
         security_id = self._get_security_id(cat)
+        if not security_id:
+            # Dhan rejects orders with an empty securityId, so never send
+            # one. The id is resolved from the option chain on the next
+            # tick once the async resolver lands (or the arm script sets
+            # it explicitly via /api/v1/strategies/upsert).
+            log.warning(
+                "Entry deferred: security_id unresolved",
+                catalog_id=cat.id,
+                symbol=symbol,
+                hint="arm the strategy with security_id + strike + expiry",
+            )
+            return
         side = signal.get("side", "BUY")
         qty = int(signal.get("qty", 1))
 
@@ -1061,6 +1095,12 @@ class ExecutionEngine:
             return
         symbol = self._get_symbol(cat)
         security_id = self._get_security_id(cat)
+        if not security_id:
+            # Cannot close a position without the contract id; the next tick
+            # retries once the option-chain resolver has populated it.
+            log.warning("Exit deferred: security_id unresolved",
+                        instance_id=instance_id, catalog_id=cat.id)
+            return
 
         if not self._dhan:
             log.warning("No Dhan client, cannot place exit order")
@@ -1117,8 +1157,14 @@ class ExecutionEngine:
                         inst.unrealized_pnl = 0.0
                         inst.status = "IDLE"
                     else:
-                        # Staged exit (e.g. TP1 50%): keep the remainder open
-                        inst.net_qty = -remaining if side == "SELL" else remaining
+                        # Staged exit (e.g. TP1 50%): keep the remainder open.
+                        # The remainder keeps its direction: selling part of a
+                        # LONG leaves a smaller LONG (still +); buying back
+                        # part of a SHORT leaves a smaller SHORT (still -).
+                        # The old code inverted the sign (-remaining), so the
+                        # next tick saw a long remainder as short and a later
+                        # "full exit" placed the wrong-side order.
+                        inst.net_qty = remaining if (inst.net_qty or 0.0) > 0 else -remaining
                     inst.last_ltp = ltp
 
                     # Log the trade
@@ -1211,14 +1257,87 @@ class ExecutionEngine:
     def _get_security_id(self, cat) -> str:
         """Get the Dhan security_id for the option contract.
 
-        Dhan security IDs are numeric. For options, the security_id is
-        resolved from the option chain API. For now, we use the
-        strategy's default_params to store it, or fall back to a
-        placeholder that the resolve_dhan_option.py script can fill.
+        The arm process should resolve and store security_id in
+        default_params. If that is missing (the common case for freshly
+        seeded catalog rows), fall back to Dhan's free option-chain
+        endpoint so orders carry a real contract id instead of "".
+        An empty security_id makes Dhan reject every order, which was
+        the silent cause of "no trade ever fills".
         """
         params = cat.default_params or {}
-        # The arm process should resolve and store security_id here
-        return str(params.get("security_id", ""))
+        sid = str(params.get("security_id", "") or "")
+        if sid:
+            return sid
+        # Resolve strike/expiry/option_type from the leg params, exactly as
+        # _get_instrument_key() does, then ask Dhan's option chain for the
+        # contract's numeric security id (free endpoint, not historical).
+        strike = params.get("strike", 0)
+        expiry = params.get("expiry", "")
+        option_type = str(params.get("option_type", "CE") or "CE").upper()
+        if (not strike or not expiry) and isinstance(params.get("legs"), list) and params["legs"]:
+            first_leg = params["legs"][0]
+            if isinstance(first_leg, dict):
+                strike = first_leg.get("strike", strike)
+                expiry = first_leg.get("expiry", expiry)
+                option_type = str(first_leg.get("option_type", option_type) or option_type).upper()
+        if not strike or not expiry:
+            log.warning("security_id unset and no strike/expiry to resolve",
+                        catalog_id=cat.id, params_keys=list(params.keys()))
+            return ""
+        # Cache resolved ids in a process-local dict (keyed by
+        # (segment, expiry, strike, option_type)) — this helper is called
+        # from sync paths on the running event loop, so it cannot await;
+        # the async resolver below schedules the lookup and remembers the
+        # result for the next call.
+        cache_key = (self._get_segment(cat), str(expiry), float(strike), option_type)
+        if cache_key in _security_id_cache:
+            params["security_id"] = _security_id_cache[cache_key]
+            return _security_id_cache[cache_key]
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            # No running loop — safe to block briefly on a fresh one.
+            from layers.brokers.dhan_client import DhanClient
+            async def _resolve_once() -> str:
+                client = DhanClient(client_id="", access_token="")
+                sec_id = await client._resolve_option_security_id(
+                    self._get_segment(cat), str(expiry), float(strike), option_type)
+                await client.close()
+                return sec_id or ""
+            try:
+                sec_id = asyncio.run(_resolve_once())
+            except Exception as e:
+                log.warning("security_id resolve failed", catalog_id=cat.id, error=str(e))
+                return ""
+            if sec_id:
+                _security_id_cache[cache_key] = sec_id
+                params["security_id"] = sec_id
+            return sec_id
+        # On the running loop: schedule the resolve and return the cached
+        # value if already known; otherwise return "" for this call and let
+        # the next tick (1s later) pick up the resolved id. The async
+        # callback stores the result in the shared cache.
+        try:
+            from layers.brokers.dhan_client import DhanClient
+            client = self._dhan  # authenticated DhanClient from main.py
+
+            async def _resolve_async() -> None:
+                if client is None:
+                    return
+                sec_id = await client._resolve_option_security_id(
+                    self._get_segment(cat), str(expiry), float(strike), option_type)
+                if sec_id and cache_key not in _security_id_cache:
+                    _security_id_cache[cache_key] = sec_id
+                    log.info("security_id resolved via option chain",
+                             catalog_id=cat.id, security_id=sec_id)
+            loop.create_task(_resolve_async())
+        except Exception as e:
+            log.warning("security_id resolve deferred", catalog_id=cat.id, error=str(e))
+        return ""
+
 
     def _get_segment(self, cat) -> str:
         """Return the Dhan exchange_segment for this catalog entry.

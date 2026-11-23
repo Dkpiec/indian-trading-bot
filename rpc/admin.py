@@ -5,6 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional
 
+from core.security import get_current_user, require_master, issue_master_token
+
 router = APIRouter()
 
 
@@ -16,9 +18,17 @@ class MasterCredentialRequest(BaseModel):
 
 
 @router.post("/master-credentials")
-async def set_master_credential(req: MasterCredentialRequest):
-    """Set a master credential override for a broker."""
-    from core.security import encrypt_secret
+async def set_master_credential(
+    req: MasterCredentialRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Set a master credential override for a broker.
+
+    Master-only: the JWT must carry the is_master claim (issued by the
+    /api/v1/admin/master-token bootstrap below). The old code had NO
+    auth dependency on this endpoint at all.
+    """
+    require_master(user)
     from core.main import cred_router
 
     await cred_router.set_master_override(

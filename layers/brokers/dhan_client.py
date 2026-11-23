@@ -26,6 +26,10 @@ class DhanClient(BrokerBase):
         self._client_id = client_id
         self._access_token = access_token
         self._http = httpx.AsyncClient(timeout=timeout)
+        # Per-instance failure state (see class comment on _INDEX_POLL_RETRY_S).
+        self._index_poll_disabled: Dict[str, float] = {}
+        self._yahoo_ltp_cache: Dict[str, tuple] = {}
+        self._YAHOO_MIN_INTERVAL = 30.0
 
     def _headers(self) -> dict:
         return {
@@ -99,7 +103,9 @@ class DhanClient(BrokerBase):
     YAHOO_INDEX = {"NIFTY": "%5ENSEI", "SENSEX": "%5EBSESN", "BANKNIFTY": "%5ENSEI"}
 
     # Per-symbol failure state so we stop hammering a dead Dhan endpoint.
-    _index_poll_disabled: Dict[str, float] = {}  # symbol → ts of last Dhan failure
+    # Instance-level, NOT class-level: a class attribute would be shared
+    # across every DhanClient instance, so one failing token would silently
+    # disable the poll for everyone. Initialized in __init__ below.
     _INDEX_POLL_RETRY_S = 300.0  # re-try the Dhan poll every 5 min
 
     async def get_index_ltp(self, symbol: str = "NSE") -> Optional[float]:
@@ -178,9 +184,8 @@ class DhanClient(BrokerBase):
             log.debug("Dhan index LTP poll failed", symbol=symbol, error=str(e))
         return None
 
-    # Rate-limit Yahoo index polls: max 1 call per 30s per symbol.
-    _yahoo_ltp_cache: Dict[str, tuple] = {}  # symbol → (ts, value)
-    _YAHOO_MIN_INTERVAL = 30.0
+    # Rate-limit Yahoo index polls: max 1 call per 30s per symbol
+    # (instance-level state, initialized in __init__).
 
     async def _yahoo_index_ltp(self, symbol: str) -> Optional[float]:
         """Free Yahoo v8 chart API — last close as the spot proxy.
@@ -211,12 +216,25 @@ class DhanClient(BrokerBase):
             result = (data.get("chart", {}).get("result") or [None])[0]
             if not result:
                 return None
+            meta = result.get("meta") or {}
             close = (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [None])
             last = [v for v in close if v is not None]
             if last:
                 val = float(last[-1])
+                # Staleness guard: after close / on weekends the last 1m
+                # bar can be hours (or days) old. Trust it only when the
+                # chart reports a recent lastTradeTime (<= 300s), or when
+                # the market is open and the series has data at all.
+                import datetime as _dt
+                last_trade_ts = meta.get("lastTradeTime") or meta.get("regularMarketTime")
+                if last_trade_ts:
+                    age = time.time() - int(last_trade_ts)
+                    if age > 300:
+                        log.debug("Yahoo index LTP stale", symbol=symbol, age_s=round(age, 1))
+                        return None
                 self._yahoo_ltp_cache[symbol] = (time.time(), val)
-                log.debug("Yahoo index LTP resolved", symbol=symbol, ltp=val)
+                log.debug("Yahoo index LTP resolved", symbol=symbol, ltp=val,
+                          last_trade_ts=last_trade_ts)
                 return val
             log.debug("Yahoo index LTP empty", symbol=symbol)
             return None
@@ -266,9 +284,16 @@ class DhanClient(BrokerBase):
         SENSEX options live on BSE_FNO; NIFTY/BANKNIFTY on NSE_FNO.
         The option chain returns a list of contracts with securityId,
         strikePrice, expiry, and contract type (CE/PE).
+
+        Matches the REQUESTED expiry exactly (falling back to the nearest
+        available expiry) — the old code ignored the expiry argument and
+        returned the first matching strike across all expiries, which
+        resolved to the wrong (usually nearest-week) contract for DTE-5
+        or monthly legs.
         """
         dhan_seg = segment.replace("_FO", "_FNO") if segment else "NSE_FNO"
         opt_type = option_type.upper()
+        target_expiry = (expiry or "").strip()
         try:
             url = f"{DHAN_BASE}/option-chain"
             # Dhan option chain: exchangeSegment, underSecurityId, expiry
@@ -284,36 +309,84 @@ class DhanClient(BrokerBase):
             if resp.status_code == 200:
                 data = resp.json()
                 inner = data.get("data", {})
-                # Find the matching contract: strike + CE/PE + nearest expiry
                 ce_pe_key = "CE" if opt_type == "CE" else "PE"
-                for expiry_key, expiry_data in inner.items():
-                    if not isinstance(expiry_data, dict):
-                        continue
-                    for opt in expiry_data.get("data", {}).get(ce_pe_key, []):
+                if target_expiry:
+                    # Exact-expiry match first.
+                    for opt in inner.get(target_expiry, {}).get("data", {}).get(ce_pe_key, []) or []:
                         if abs(float(opt.get("strikePrice", 0)) - strike) < 0.01:
                             sec_id = str(opt.get("securityId", ""))
                             if sec_id:
                                 log.debug("Dhan option chain resolved security_id",
                                           segment=dhan_seg, strike=strike,
-                                          opt=opt_type, security_id=sec_id)
+                                          opt=opt_type, expiry=target_expiry,
+                                          security_id=sec_id)
                                 return sec_id
+                    # No exact expiry in the chain — fall back to the nearest
+                    # expiry that carries this strike (logged, not silent).
+                    import datetime as _dt
+                    try:
+                        target_dt = _dt.date.fromisoformat(target_expiry)
+                    except ValueError:
+                        target_dt = None
+                    best: Optional[tuple] = None
+                    for expiry_key, expiry_data in inner.items():
+                        if not isinstance(expiry_data, dict):
+                            continue
+                        for opt in expiry_data.get("data", {}).get(ce_pe_key, []) or []:
+                            if abs(float(opt.get("strikePrice", 0)) - strike) < 0.01:
+                                sec_id = str(opt.get("securityId", ""))
+                                if not sec_id:
+                                    continue
+                                try:
+                                    delta = abs((_dt.date.fromisoformat(expiry_key) - target_dt).days) if target_dt else 0
+                                except Exception:
+                                    delta = 10_000
+                                if best is None or delta < best[0]:
+                                    best = (delta, sec_id, expiry_key)
+                    if best:
+                        log.warning("Dhan option chain: requested expiry not found; using nearest",
+                                    segment=dhan_seg, requested=expiry,
+                                    used=best[2], security_id=best[1])
+                        return best[1]
+                else:
+                    # No expiry requested: keep the old behavior (first match).
+                    for expiry_key, expiry_data in inner.items():
+                        if not isinstance(expiry_data, dict):
+                            continue
+                        for opt in expiry_data.get("data", {}).get(ce_pe_key, []) or []:
+                            if abs(float(opt.get("strikePrice", 0)) - strike) < 0.01:
+                                sec_id = str(opt.get("securityId", ""))
+                                if sec_id:
+                                    log.debug("Dhan option chain resolved security_id",
+                                              segment=dhan_seg, strike=strike,
+                                              opt=opt_type, security_id=sec_id)
+                                    return sec_id
         except Exception as e:
             log.debug("Dhan option chain resolve failed", error=str(e))
         return None
 
     async def get_order_status(self, broker_order_id: str) -> Dict[str, Any]:
-        url = f"{DHAN_BASE}/orderbook/trade/{broker_order_id}"
+        # Dhan v2: order history is a POST to /orders/history with the
+        # dhanClientId; the v1-style GET /orderbook/trade/{id} no longer
+        # exists and 404s. (v2 has no per-txnId lookup — we request the
+        # day's history and pick our txn id out of it.)
+        url = f"{DHAN_BASE}/orders/history"
         payload = {"dhanClientId": self._client_id}
         resp = await self._http.post(url, json=payload, headers=self._headers())
         if resp.status_code != 200:
             return {"status": "UNKNOWN", "message": resp.text}
         data = resp.json()
-        trades = data.get("data", {}).get("trades", [])
-        dhan_status = str(data.get("status", "")).upper() if isinstance(data.get("status"), str) else ""
-        return {"status": dhan_status or "OPEN", "raw": data}
+        orders = data.get("data", {}).get("orders", [])
+        for o in orders or []:
+            if str(o.get("txnId") or o.get("orderId")) == str(broker_order_id):
+                state = str(o.get("state") or o.get("status") or "").upper()
+                # Dhan v2 states: OPEN, CLOSED, CANCELLED, REJECTED, ...
+                return {"status": state or "OPEN", "raw": o}
+        return {"status": "UNKNOWN", "message": "txn id not in today's history", "raw": data}
 
     async def cancel_order(self, broker_order_id: str) -> Dict[str, Any]:
-        url = f"{DHAN_BASE}/orderbook/trade/cancel"
+        # Dhan v2 cancel endpoint (v1 /orderbook/trade/cancel is gone).
+        url = f"{DHAN_BASE}/orders/cancel"
         payload = {
             "dhanClientId": self._client_id,
             "transactionId": broker_order_id,

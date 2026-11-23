@@ -63,8 +63,10 @@ class StrategyPlugin:
             elif not state.get("entry_window_open", False):
                 return None
 
-            # Check 1 trade per day invariant
-            if self.params.get('trade_taken_today', False):
+            # Check 1 trade per day invariant (the engine sets this on the
+            # STATE dict, not on the plugin's static params — reading it from
+            # self.params here was always False and the guard was dead).
+            if state.get('trade_taken_today', self.params.get('trade_taken_today', False)):
                 return None
 
             # OR Width Regime Filter (v6e: wider band [0.10%, 1.10%])

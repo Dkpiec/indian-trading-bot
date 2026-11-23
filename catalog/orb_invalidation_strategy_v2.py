@@ -34,7 +34,9 @@ class StrategyPlugin:
             if not _market_open:
                 return None
             # One trade per session per strategy (set by the arming script / dispatch).
-            if self.params.get('trade_taken_today', False):
+            # 1 trade per day: read from STATE (the engine sets it there),
+            # with the static param as a legacy fallback.
+            if state.get('trade_taken_today', self.params.get('trade_taken_today', False)):
                 return None
             or_high = self._safe_float(self.params.get('or_high') or state.get('or_high', 0.0), 0.0)
             or_low = self._safe_float(self.params.get('or_low') or state.get('or_low', 0.0), 0.0)

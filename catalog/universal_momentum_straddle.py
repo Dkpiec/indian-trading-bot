@@ -32,7 +32,7 @@ class StrategyPlugin:
         if net_qty == 0 and self.params.get('auto_enter', False):
             if not _market_open:
                 return None
-            if self.params.get('trade_taken_today', False):
+            if state.get('trade_taken_today', self.params.get('trade_taken_today', False)):
                 return None
             or_high = self._safe_float(self.params.get('or_high', 0.0), 0.0)
             or_low = self._safe_float(self.params.get('or_low', 0.0), 0.0)

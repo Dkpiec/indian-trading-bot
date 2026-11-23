@@ -38,10 +38,12 @@ class UpstoxClient(BrokerBase):
         if resp.status_code != 200:
             raise RuntimeError(f"Upstox balance failed: {resp.status_code} {resp.text}")
         data = resp.json().get("data", {})
-        # Upstox returns nested fund summary; normalize defensively
-        total = float(data.get("total_equity", data.get("net", 0)))
-        free = float(data.get("available_margin", data.get("available_live_balance", 0)))
-        used = float(data.get("used_margin", data.get("margin_used", 0)))
+        # Upstox v2 /user/get-funds-and-margin returns a fund_summary dict
+        # with keys available_margin / used_margin / net (total equity).
+        fund = data.get("fund_summary") or data
+        total = float(fund.get("net", fund.get("total_equity", 0)))
+        free = float(fund.get("available_margin", fund.get("available_live_balance", 0)))
+        used = float(fund.get("used_margin", fund.get("margin_used", 0)))
         return BalanceSnapshot(
             total_equity=total,
             free_balance=free,
@@ -58,7 +60,7 @@ class UpstoxClient(BrokerBase):
         quantity: int,
         order_type: str = "MARKET",
         price: float = 0.0,
-        product_type: str = "I",
+        product_type: str = "INTRADAY",
         validity: str = "DAY",
         exchange_segment: str = "NSE_FO",
         client_order_id: Optional[str] = None,

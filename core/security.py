@@ -19,7 +19,16 @@ log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 def _get_fernet() -> Fernet:
-    """Get or create Fernet cipher from MASTER_ENCRYPTION_KEY env."""
+    """Get or create Fernet cipher from MASTER_ENCRYPTION_KEY env.
+
+    The ephemeral-key fallback (dev only) is DANGEROUS: every process
+    that lacks the env var generates a DIFFERENT key, so credentials
+    encrypted in one process (or one container replica, or before a
+    redeploy) cannot be decrypted in another. We keep the dev fallback
+    but refuse to silently start in that state when a credential is
+    actually being written — encrypt_secret() raises instead of
+    producing undecryptable ciphertext.
+    """
     key_b64 = settings.master_encryption_key.encode() if settings.master_encryption_key else None
     if not key_b64:
         # Generate ephemeral key (dev only — in production this MUST be set)
@@ -68,6 +77,26 @@ def create_access_token(user_id: str, broker: str = "dhan", expires_min: int = 1
     payload = {
         "sub": user_id,
         "broker": broker,
+        "iat": now,
+        "exp": now + timedelta(minutes=expires_min),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def issue_master_token(user_id: str, expires_min: int = 60) -> str:
+    """Mint a short-lived JWT carrying the is_master claim.
+
+    The platform owner calls this (out-of-band, e.g. from the deploy
+    host) to get a token that passes require_master() for one hour.
+    This is the only supported way to reach /api/v1/admin/master-credentials
+    — the old code had no token path at all, so admin endpoints were
+    unreachable even for the owner.
+    """
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "broker": "dhan",
+        "is_master": True,
         "iat": now,
         "exp": now + timedelta(minutes=expires_min),
     }
@@ -202,7 +231,26 @@ async def get_current_user(
     if not payload:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
-    return {"user_id": payload["sub"], "broker": payload.get("broker", "dhan")}
+    return {
+        "user_id": payload["sub"],
+        "broker": payload.get("broker", "dhan"),
+        # Carry the master claim so require_master() can enforce it. The old
+        # code never set is_master, so every admin endpoint 403'd even for
+        # the platform owner.
+        "is_master": bool(payload.get("is_master", False)),
+    }
+
+
+# Set by core.main at startup when JWT_SECRET is the insecure default, so
+# require_master() refuses to trust is_master claims minted with it.
+# (Importing core.main from security would be a circular import, hence the
+# module-level flag + setter.)
+INSECURE_DEFAULT_JWT_SECRET = False
+
+
+def set_insecure_default_jwt_secret(flag: bool) -> None:
+    global INSECURE_DEFAULT_JWT_SECRET
+    INSECURE_DEFAULT_JWT_SECRET = bool(flag)
 
 
 def require_master(user: dict) -> None:
@@ -211,3 +259,9 @@ def require_master(user: dict) -> None:
     # For now, master endpoints require a separate master API key
     if not user.get("is_master"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Master access required")
+    # And never trust a master claim minted with the shipped default secret.
+    if INSECURE_DEFAULT_JWT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Master access unavailable: JWT_SECRET is the insecure default; set it via env",
+        )

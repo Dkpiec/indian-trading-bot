@@ -265,7 +265,11 @@ class UpstoxWSV3:
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
-                break
+                # Propagate so task cancellation / feed.stop() actually
+                # terminates this consumer. The old `break` swallowed the
+                # cancellation and left a zombie task with a full queue.
+                self._running = False
+                raise
 
     @property
     def connected(self) -> bool:
@@ -583,7 +587,14 @@ class UpstoxWSV3:
                     lambda t=tick: self._queue.put_nowait(t)
                 )
         except asyncio.QueueFull:
-            pass
+            # The consumer (the engine's 1s tick) is behind — the WS stream
+            # is faster than the poll loop can drain it. Drop the overflow
+            # but LOG it: a full queue for >60s means the event loop is
+            # stuck (blocking call elsewhere) and LTPs are going stale.
+            if time.time() - getattr(self, "_last_queue_full_log", 0.0) > 60.0:
+                self._last_queue_full_log = time.time()
+                log.warning("Upstox WS tick queue full — dropping ticks "
+                            "(consumer blocked or too slow)")
         except Exception as e:
             log.error("Upstox WS message bridge error", error=str(e))
 

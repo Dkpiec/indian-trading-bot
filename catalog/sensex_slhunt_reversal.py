@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import structlog
 log = structlog.get_logger(__name__)
+import threading
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -70,56 +71,80 @@ DEFAULT_CONFIG = {
     "dte": 5.0,         # days to expiry
 }
 
-# SENSEX 5m candle source: Dhan option-chain LTP proxy (free, not historical).
-# Yahoo has no free SENSEX index ticker, so we use the Dhan live option LTP
-# as the spot proxy. The sweep/rejection check runs on the option LTP, not
-# the index — matching the backtest's option-level signal.
+# SENSEX 5m candle source: Dhan live quote for the SENSEX index (free, not
+# historical). Yahoo has no free SENSEX ticker. The old code posted
+# exchangeSegment="INDEX" and read data.data[].lastPrice — both wrong for
+# Dhan v2 (the segment is IDX_I and the response is a flat list), so the
+# endpoint returned [] and the plugin fell back to a single synthetic bar
+# with O=H=L=C. We now accumulate REAL 5m bars from polled quotes so the
+# sweep/rejection check has genuine bar structure.
 DHAN_BASE = "https://api.dhan.co/v2"
 SENSEX_INDEX_ID = "mid3040"  # Dhan SENSEX index security_id
 
+# In-process 5m bar accumulator for the SENSEX index quote.
+_sensex_bars: Dict[str, Any] = {"poll_ts": 0.0, "bars": []}
+_sensex_lock = threading.Lock()
+_SENSEX_POLL_S = 3.0  # poll the live quote at most once every 3s
 
 
 def _fetch_sensex_5m_candles() -> list:
     """Return [(ts_epoch, open, high, low, close)] for today's SENSEX 5m bars.
 
-    Uses the Dhan live option-chain LTP as the spot proxy (free, not a
-    chargeable historical endpoint). Returns [] on any network/parse failure.
-    The list contains a single synthetic bar per call so the sweep/rejection
-    check can evaluate against the live option LTP.
+    Polls the Dhan SENSEX index live quote (free, not a chargeable
+    historical endpoint) every few seconds and accumulates real 5m bars in
+    memory. The caller (the 1s tick loop) never blocks on the network:
+    each call is a single small POST at most every _SENSEX_POLL_S, and a
+    failed poll simply keeps the bars accumulated so far.
     """
     import time
-    try:
-        import urllib.request
-        # Dhan market/quote for the SENSEX index (free live quote)
-        url = f"{DHAN_BASE}/market/quote"
-        payload = {"securityId": SENSEX_INDEX_ID, "exchangeSegment": "INDEX"}
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-        items = data.get("data", {}).get("data", [])
-        if not items:
-            return []
-        last = items[0].get("lastPrice")
-        if not last:
-            return []
-        ltp = float(last)
-        # Timestamp one full bar in the past so the bar passes the "completed
-        # bar" filter (c[0] <= now_ts - 300) — a live now-ts would be excluded
-        # as in-progress.
-        ts = int(time.time()) - 300
-        # Single synthetic 5m bar: open = high = low = close = LTP
-        # The sweep/rejection check uses the close and the OR bounds from
-        # params; the wick threshold is satisfied when the LTP crosses the
-        # OR bound. This is a reasonable live proxy for the option-level signal.
-        return [(ts, ltp, ltp, ltp, ltp)]
-    except Exception as e:
-        log.warning("SENSEX SLHUNT 5m feed failed", error=str(e))
-        return []
+    now = time.time()
+    with _sensex_lock:
+        need_poll = now - _sensex_bars["poll_ts"] >= _SENSEX_POLL_S
+        _sensex_bars["poll_ts"] = now  # throttle marker even if the poll fails
+
+    if need_poll:
+        try:
+            url = f"{DHAN_BASE}/market/quote"
+            # Dhan v2: index quotes use exchangeSegment="IDX_I"; the response
+            # is a flat {"data": [ {...} ]} list (NOT data.data).
+            payload = {"securityId": SENSEX_INDEX_ID, "exchangeSegment": "IDX_I"}
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+            spot: Optional[float] = None
+            for item in data.get("data") or []:
+                if isinstance(item, dict) and str(item.get("securityId")) == SENSEX_INDEX_ID:
+                    spot = float(item.get("lastPrice") or item.get("last_price") or 0) or None
+            if spot is not None:
+                with _sensex_lock:
+                    bars = _sensex_bars["bars"]
+                    # Bucket the quote into 5m bars (floor the epoch to 5m).
+                    bucket = int(now // 300) * 300
+                    if bars and bars[-1][0] == bucket:
+                        o, h, l, c = bars[-1][1], bars[-1][2], bars[-1][3], bars[-1][4]
+                        bars[-1] = (bucket, o, max(h, spot), min(l, spot), spot)
+                    else:
+                        bars.append((bucket, spot, spot, spot, spot))
+                    # Drop bars older than one trading day (restart safety).
+                    day_start = datetime.now(timezone.utc).replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    ).timestamp()
+                    _sensex_bars["bars"] = [b for b in bars if b[0] >= day_start - 300]
+        except Exception as e:
+            log.warning("SENSEX SLHUNT index poll failed", error=str(e))
+            spot = None
+
+    with _sensex_lock:
+        completed_cut = now - 300
+        # Return only the COMPLETED bars (the in-progress 5m window excluded,
+        # matching the NIFTY plugin's "act on closed bars" rule).
+        out = [b for b in _sensex_bars["bars"] if b[0] <= completed_cut]
+    return out
 
 
 class StrategyPlugin:
@@ -342,14 +367,16 @@ class StrategyPlugin:
                 "reason": f"SLHUNT SENSEX: time stop (held {bars_held} bars >= {hold}) — close",
             }
 
-        # EOD: close before 15:30 IST.
+        # EOD: close before 15:15 IST (not 15:30). The engine's tick loop
+        # stops at exactly 15:30, so a 15:30 exit could never be placed;
+        # 15:15 leaves the last 15 market minutes for the order to fill.
         from zoneinfo import ZoneInfo
         now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-        if now_ist.hour * 60 + now_ist.minute >= (15 * 60 + 30):
+        if now_ist.hour * 60 + now_ist.minute >= (15 * 60 + 15):
             return {
                 "action": "EXIT",
                 "side": "SELL",
                 "qty": int(abs(net_qty)),
-                "reason": "SLHUNT SENSEX: EOD (15:30 IST) — flat",
+                "reason": "SLHUNT SENSEX: EOD (15:15 IST) — flat",
             }
         return None
