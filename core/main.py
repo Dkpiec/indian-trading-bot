@@ -26,33 +26,55 @@ def _run_alembic_upgrade(cfg) -> None:
 # Database + Redis setup
 # ---------------------------------------------------------------------------
 
-engine = create_async_engine(
-    settings.database_url,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True,
-    echo=False,
-)
+engine = None
+async_session_factory = None
+_db_available = False
 
-async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+def _init_database() -> None:
+    """Initialize the async database engine. Sets globals on success."""
+    global engine, async_session_factory, _db_available
+    try:
+        engine = create_async_engine(
+            settings.database_url,
+            pool_size=10,
+            max_overflow=20,
+            pool_pre_ping=True,
+            echo=False,
+        )
+        async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        _db_available = True
+        log.info("Database engine initialized", url=settings.database_url.split("@")[-1])
+    except Exception as e:
+        log.warning("Database engine init failed — running in degraded mode", error=str(e))
+        _db_available = False
+
+_init_database()
 
 _redis_pool = None
 
 
 async def get_redis():
-    """Lazy Redis connection pool."""
+    """Lazy Redis connection pool. Returns None if Redis is unavailable."""
     global _redis_pool
     if _redis_pool is None:
-        import redis.asyncio as aioredis
-        _redis_pool = aioredis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
-    return _redis_pool
+        try:
+            import redis.asyncio as aioredis
+            _redis_pool = aioredis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+        except Exception as e:
+            log.warning("Redis pool init failed — running without Redis", error=str(e))
+            _redis_pool = False  # sentinel: tried and failed
+    return _redis_pool if _redis_pool else None
 
 
 # ---------------------------------------------------------------------------
-# Credential router (singleton)
+# Credential router (singleton) — may be None in degraded mode
 # ---------------------------------------------------------------------------
 
-cred_router = MasterCredentialRouter(async_session_factory)
+if _db_available and async_session_factory is not None:
+    cred_router = MasterCredentialRouter(async_session_factory)
+else:
+    cred_router = None
+    log.warning("Credential router disabled — database unavailable")
 
 
 # ---------------------------------------------------------------------------
@@ -65,73 +87,79 @@ async def lifespan(app: FastAPI):
     log.info("Indian Trading Bot starting", version="4.0.0")
 
     # Run Alembic migrations on startup (async-safe: no asyncio.run())
-    try:
-        from sqlalchemy import text
-        async with engine.begin() as conn:
-            # Check if tables already exist (idempotent first-run check)
-            result = await conn.execute(text(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'users'"
-            ))
-            table_exists = result.scalar() == 1
+    if _db_available:
+        try:
+            from sqlalchemy import text
+            async with engine.begin() as conn:
+                # Check if tables already exist (idempotent first-run check)
+                result = await conn.execute(text(
+                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'users'"
+                ))
+                table_exists = result.scalar() == 1
 
-            if not table_exists:
-                # Run the initial migration directly (avoids alembic CLI's asyncio.run)
-                from alembic.config import Config
-                import asyncio as _asyncio
-                alembic_cfg = Config("alembic.ini")
-                alembic_cfg.set_main_option("sqlalchemy.url", settings.database_url)
+                if not table_exists:
+                    # Run the initial migration directly (avoids alembic CLI's asyncio.run)
+                    from alembic.config import Config
+                    import asyncio as _asyncio
+                    alembic_cfg = Config("alembic.ini")
+                    alembic_cfg.set_main_option("sqlalchemy.url", settings.database_url)
 
-                # alembic command.upgrade is sync; run in a thread to avoid
-                # blocking the event loop and avoid nested asyncio.run()
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    loop = _asyncio.get_event_loop()
-                    await loop.run_in_executor(
-                        pool,
-                        lambda: _run_alembic_upgrade(alembic_cfg)
-                    )
-                log.info("Database migrations applied")
-            else:
-                log.info("Tables already exist, skipping migration")
-    except Exception as e:
-        log.warning("Migration skipped or failed", error=str(e))
+                    # alembic command.upgrade is sync; run in a thread to avoid
+                    # blocking the event loop and avoid nested asyncio.run()
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        loop = _asyncio.get_event_loop()
+                        await loop.run_in_executor(
+                            pool,
+                            lambda: _run_alembic_upgrade(alembic_cfg)
+                        )
+                    log.info("Database migrations applied")
+                else:
+                    log.info("Tables already exist, skipping migration")
+        except Exception as e:
+            log.warning("Migration skipped or failed", error=str(e))
+    else:
+        log.info("Database unavailable — skipping migrations (degraded mode)")
 
     # ------------------------------------------------------------------
-    # Seed strategy catalog if empty
+    # Seed strategy catalog if empty (only when DB is available)
     # ------------------------------------------------------------------
-    try:
-        from sqlalchemy import text as _text
-        async with async_session_factory() as session:
-            # Clear any stale sample/old strategies that don't match live roster
-            await session.execute(_text("""
-                DELETE FROM strategy_catalog WHERE id IN (
-                    'nifty-orb-v1', 'banknifty-momentum-v1', 'nifty-mean-revert-v1',
-                    'dhan_v6e_nifty', 'dhan_v6e_nifty_pe', 'nifty_slhunt_reversal',
-                    'orb_banknifty_fyers', 'orb_banknifty_fyers_pe', 'orb_sensex_dhan',
-                    'orb_sensex_dhan_pe', 'sensex_slhunt_ce', 'sensex_slhunt_pe'
-                )
-            """))
-            await session.commit()
-
-            result = await session.execute(_text("SELECT COUNT(*) FROM strategy_catalog"))
-            count = result.scalar() or 0
-            if count == 0:
+    if _db_available:
+        try:
+            from sqlalchemy import text as _text
+            async with async_session_factory() as session:
+                # Clear any stale sample/old strategies that don't match live roster
                 await session.execute(_text("""
-                    INSERT INTO strategy_catalog (id, display_name, description, plugin_file, underlying, segment, strategy_type, default_params, is_active, version, created_at, updated_at)
-                    VALUES
-                    ('NIFTY101', 'NIFTY ORB v6e', 'NIFTY ORB v6e CE+PE legs', 'dhan_v6e_nifty.py', 'NIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '6e', NOW(), NOW()),
-                    ('NIFTY102', 'NIFTY SL-Hunt v4.1b', 'NIFTY SL-Hunt v4.1b CE leg', 'nifty_slhunt_reversal.py', 'NIFTY', 'NSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1b', NOW(), NOW()),
-                    ('BANKNIFTY101', 'BankNifty ORB v2', 'BankNifty ORB Invalidation v2 CE+PE monthly', 'orb_banknifty_fyers.py', 'BANKNIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '2', NOW(), NOW()),
-                    ('SENSEX101', 'SENSEX ORB Invalidation', 'SENSEX ORB Invalidation CE+PE legs', 'orb_sensex_dhan.py', 'SENSEX', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '5', NOW(), NOW()),
-                    ('SENSEX102', 'SENSEX SL-Hunt V4.1g', 'SENSEX SL-Hunt V4.1g CE+PE legs', 'sensex_slhunt_ce.py', 'SENSEX', 'NSE_FNO', 'slhunt', '{"legs":["CE","PE"]}', true, '4.1g', NOW(), NOW())
-                    ON CONFLICT (id) DO NOTHING
+                    DELETE FROM strategy_catalog WHERE id IN (
+                        'nifty-orb-v1', 'banknifty-momentum-v1', 'nifty-mean-revert-v1',
+                        'dhan_v6e_nifty', 'dhan_v6e_nifty_pe', 'nifty_slhunt_reversal',
+                        'orb_banknifty_fyers', 'orb_banknifty_fyers_pe', 'orb_sensex_dhan',
+                        'orb_sensex_dhan_pe', 'sensex_slhunt_ce', 'sensex_slhunt_pe'
+                    )
                 """))
                 await session.commit()
-                log.info("Seeded 5 merged strategies (CE+PE legs) from Hermes multi-broker engine")
-            else:
-                log.info(f"Strategy catalog already has {count} entries, skipping seed")
-    except Exception as e:
-        log.warning("Strategy catalog seed skipped", error=str(e))
+
+                result = await session.execute(_text("SELECT COUNT(*) FROM strategy_catalog"))
+                count = result.scalar() or 0
+                if count == 0:
+                    await session.execute(_text("""
+                        INSERT INTO strategy_catalog (id, display_name, description, plugin_file, underlying, segment, strategy_type, default_params, is_active, version, created_at, updated_at)
+                        VALUES
+                        ('NIFTY101', 'NIFTY ORB v6e', 'NIFTY ORB v6e CE+PE legs', 'dhan_v6e_nifty.py', 'NIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '6e', NOW(), NOW()),
+                        ('NIFTY102', 'NIFTY SL-Hunt v4.1b', 'NIFTY SL-Hunt v4.1b CE leg', 'nifty_slhunt_reversal.py', 'NIFTY', 'NSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1b', NOW(), NOW()),
+                        ('BANKNIFTY101', 'BankNifty ORB v2', 'BankNifty ORB Invalidation v2 CE+PE monthly', 'orb_banknifty_fyers.py', 'BANKNIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '2', NOW(), NOW()),
+                        ('SENSEX101', 'SENSEX ORB Invalidation', 'SENSEX ORB Invalidation CE+PE legs', 'orb_sensex_dhan.py', 'SENSEX', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '5', NOW(), NOW()),
+                        ('SENSEX102', 'SENSEX SL-Hunt V4.1g', 'SENSEX SL-Hunt V4.1g CE legs', 'sensex_slhunt_ce.py', 'SENSEX', 'NSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1g', NOW(), NOW())
+                        ON CONFLICT (id) DO NOTHING
+                    """))
+                    await session.commit()
+                    log.info("Seeded 5 merged strategies (CE+PE legs) from Hermes multi-broker engine")
+                else:
+                    log.info(f"Strategy catalog already has {count} entries, skipping seed")
+        except Exception as e:
+            log.warning("Strategy catalog seed skipped", error=str(e))
+    else:
+        log.info("Database unavailable — skipping strategy catalog seed (degraded mode)")
 
     # ------------------------------------------------------------------
     # Broker clients (real credentials from env / coolify.env)
@@ -241,9 +269,10 @@ async def lifespan(app: FastAPI):
     if dhan_client:
         await dhan_client.close()
 
-    if _redis_pool:
+    if _redis_pool and _redis_pool is not False:
         await _redis_pool.close()
-    await engine.dispose()
+    if engine:
+        await engine.dispose()
     log.info("Indian Trading Bot stopped")
 
 

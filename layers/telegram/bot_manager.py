@@ -57,12 +57,13 @@ class BotManager:
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
-        redis: Redis,
+        redis: Optional[Redis],
         dhan_client=None,
     ) -> None:
         self._session_factory = session_factory
         self._redis = redis
         self._app_state_dhan_client = dhan_client
+        self._db_available = session_factory is not None
         # token → Application instance
         self._apps: dict[str, Application] = {}
         # token → set of user_ids currently using this token
@@ -93,8 +94,12 @@ class BotManager:
             self._token_users[token].add(user_id)
             self._chat_user_map[str(chat_id)] = user_id
 
-            # Persist mapping in Redis for cross-process lookups
-            await self._redis.set(f"tg_user:{chat_id}", user_id)
+            # Persist mapping in Redis for cross-process lookups (if available)
+            if self._redis:
+                try:
+                    await self._redis.set(f"tg_user:{chat_id}", user_id)
+                except Exception as e:
+                    log.warning("Redis set failed (non-fatal)", error=str(e))
 
         log.info(
             "Bot user registered",
@@ -120,7 +125,11 @@ class BotManager:
                 cid for cid, uid in self._chat_user_map.items() if uid == user_id
             ]
             for cid in chat_ids_to_remove:
-                await self._redis.delete(f"tg_user:{cid}")
+                if self._redis:
+                    try:
+                        await self._redis.delete(f"tg_user:{cid}")
+                    except Exception as e:
+                        log.warning("Redis delete failed (non-fatal)", error=str(e))
                 del self._chat_user_map[cid]
 
             # Remove from token tracking
@@ -173,9 +182,14 @@ class BotManager:
             return user_id
 
         # Fallback to Redis (survives restarts)
-        user_id = await self._redis.get(f"tg_user:{chat_id}")
-        if user_id:
-            self._chat_user_map[str(chat_id)] = user_id
+        if self._redis:
+            try:
+                user_id = await self._redis.get(f"tg_user:{chat_id}")
+            except Exception as e:
+                log.warning("Redis get failed (non-fatal)", error=str(e))
+                user_id = None
+            if user_id:
+                self._chat_user_map[str(chat_id)] = user_id
         return user_id
 
     async def send_message(self, chat_id: str, text: str) -> bool:
@@ -289,8 +303,12 @@ class BotManager:
 
         Tokens are stored encrypted, so we store a SHA-256 hash alongside
         (users.telegram_token_hash) for O(1) lookup. If the hash column
-        doesn't exist yet, returns 0 and relies on in-memory tracking.
+        doesn't exist yet or DB is unavailable, returns 0 and relies on
+        in-memory tracking.
         """
+        if not self._db_available or self._session_factory is None:
+            return 0
+
         import hashlib
         from sqlalchemy import select, func as sa_func
 
