@@ -31,11 +31,48 @@ async_session_factory = None
 _db_available = False
 
 def _init_database() -> None:
-    """Initialize the async database engine. Sets globals on success."""
+    """Initialize the async database engine. Sets globals on success.
+    
+    If the target database doesn't exist yet, connects to the 'postgres'
+    maintenance database and creates it first.
+    """
     global engine, async_session_factory, _db_available
     try:
+        db_url = settings.database_url
+        db_name = db_url.rstrip('/').split('/')[-1]
+
+        import asyncio
+        from sqlalchemy import text
+
+        # Test connection to target DB; if it doesn't exist, create it
+        def _ensure_database():
+            """Sync helper: test DB connection, create DB if missing."""
+            test_engine = create_async_engine(db_url, pool_size=1, echo=False)
+
+            async def _run():
+                try:
+                    async with test_engine.connect() as conn:
+                        await conn.execute(text("SELECT 1"))
+                except Exception:
+                    # Database doesn't exist — create it via 'postgres' DB
+                    admin_url = db_url.replace(f"/{db_name}", "/postgres")
+                    admin_engine = create_async_engine(admin_url, pool_size=1, echo=False)
+                    try:
+                        async with admin_engine.connect() as admin_conn:
+                            await admin_conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+                            await admin_conn.commit()
+                    finally:
+                        await admin_engine.dispose()
+                finally:
+                    await test_engine.dispose()
+
+            asyncio.run(_run())
+
+        _ensure_database()
+
+        # Now create the main engine (DB should exist)
         engine = create_async_engine(
-            settings.database_url,
+            db_url,
             pool_size=10,
             max_overflow=20,
             pool_pre_ping=True,
@@ -43,7 +80,7 @@ def _init_database() -> None:
         )
         async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         _db_available = True
-        log.info("Database engine initialized", url=settings.database_url.split("@")[-1])
+        log.info("Database engine initialized", url=db_url.split("@")[-1])
     except Exception as e:
         log.warning("Database engine init failed — running in degraded mode", error=str(e))
         _db_available = False
