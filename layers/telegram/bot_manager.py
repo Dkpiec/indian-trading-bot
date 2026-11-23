@@ -286,11 +286,29 @@ class BotManager:
         # Initialize (makes app.bot available)
         await app.initialize()
 
-        # Set menu commands
+        # Set menu commands for ALL scopes (default, private, group).
+        # Telegram uses scope-specific commands when available; if a previous
+        # setMyCommands set all_private_chats to 60 commands, the default 21
+        # get shadowed in DMs. Overwrite all three scopes.
         try:
             await app.bot.set_my_commands(MENU_COMMANDS)
+            # Scoped commands via raw API (PTB v21.9 doesn't expose scope param cleanly)
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=10.0) as _client:
+                for _scope_type in ["all_private_chats", "all_group_chats"]:
+                    await _client.post(
+                        f"https://api.telegram.org/bot{token}/setMyCommands",
+                        json={
+                            "scope": {"type": _scope_type},
+                            "commands": [
+                                {"command": c.command, "description": c.description}
+                                for c in MENU_COMMANDS
+                            ],
+                        },
+                    )
+            log.info("Menu commands set for all scopes", count=len(MENU_COMMANDS))
         except Exception as e:
-            log.warning("Failed to set bot commands menu", error=str(e))
+            log.warning("Failed to set scoped bot commands", error=str(e))
 
         # Start app (makes bot available for API calls)
         await app.start()
