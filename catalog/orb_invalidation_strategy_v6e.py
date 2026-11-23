@@ -92,6 +92,10 @@ class StrategyPlugin:
             # gap where option_ltp_ref==0 lets the supervisor's Rule-2 bracket through.
             min_premium = self._safe_float(p.get('min_premium'), 5.0)
             ref_prem = self._safe_float(self.params.get('option_ltp_ref', 0.0), 0.0)
+            if ref_prem <= 0:
+                # No static reference premium set — use the live option LTP
+                # passed in as `ltp` so the floor still applies.
+                ref_prem = self._safe_float(ltp, 0.0)
             if min_premium > 0 and ref_prem > 0 and ref_prem < min_premium:
                 return None
 

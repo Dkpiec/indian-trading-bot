@@ -36,8 +36,8 @@ class StrategyPlugin:
             # One trade per session per strategy (set by the arming script / dispatch).
             if self.params.get('trade_taken_today', False):
                 return None
-            or_high = self._safe_float(self.params.get('or_high', 0.0), 0.0)
-            or_low = self._safe_float(self.params.get('or_low', 0.0), 0.0)
+            or_high = self._safe_float(self.params.get('or_high') or state.get('or_high', 0.0), 0.0)
+            or_low = self._safe_float(self.params.get('or_low') or state.get('or_low', 0.0), 0.0)
 
             if trigger_type == 'BREAKDOWN':
                 if or_low > 0 and ltp < or_low:

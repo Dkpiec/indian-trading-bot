@@ -315,6 +315,7 @@ class ExecutionEngine:
             "unrealized_pnl": 0.0,
             "spot_ltp": 0.0,
             "trade_taken_today": False,
+            "entry_window_open": self._entry_window_open(),
         }
 
         async with self._session_factory() as session:
@@ -332,12 +333,12 @@ class ExecutionEngine:
                 state["unrealized_pnl"] = inst.unrealized_pnl or 0.0
 
             # Check if a trade was taken today
-            today_start = datetime.now(IST).date().isoformat()
-            from sqlalchemy import func
+            from sqlalchemy import func as _func
+            today = datetime.now(IST).date()
             result = await session.execute(
-                select(func.count()).where(
+                select(_func.count()).where(
                     TradeOrderLedger.instance_id == instance_id,
-                    func.date(TradeOrderLedger.created_at.cast(Date)) == today_start,
+                    TradeOrderLedger.created_at.cast(Date) == today,
                     TradeOrderLedger.status == "FILLED",
                     TradeOrderLedger.side == "BUY",
                 )
@@ -351,6 +352,15 @@ class ExecutionEngine:
             state["or_mid"] = cat.default_params.get("or_mid", 0)
 
         return state
+
+    def _entry_window_open(self) -> bool:
+        """True only inside the 09:45:05-13:15:00 IST weekday entry window."""
+        now_ist = datetime.now(IST)
+        if now_ist.weekday() >= 5:
+            return False
+        t = now_ist.time()
+        from datetime import time as _t
+        return _t(9, 45, 5) <= t <= _t(13, 15, 0)
 
     # ------------------------------------------------------------------
     # Entry execution
@@ -491,8 +501,25 @@ class ExecutionEngine:
         from layers.state.models import StrategyInstance, TradeOrderLedger
         from sqlalchemy import select
 
+        # Full exits: qty resolved from the instance's live net_qty so a 40-unit
+        # SENSEX position closes in one order, not 1. Staged (TP1 50%) exits
+        # pass an explicit qty and keep the remainder open.
         side = signal.get("side", "SELL")
-        qty = int(signal.get("qty", 1))
+        qty = int(signal.get("qty", 0))
+        if qty <= 0:
+            async with self._session_factory() as _pre:
+                _r = await _pre.execute(
+                    select(StrategyInstance).where(
+                        StrategyInstance.instance_id == instance_id,
+                        StrategyInstance.status == "RUNNING",
+                    )
+                )
+                _inst = _r.scalar_one_or_none()
+                if _inst is not None and _inst.net_qty:
+                    qty = abs(int(_inst.net_qty))
+        if qty <= 0:
+            log.warning("Exit skipped: no position qty resolved", instance_id=instance_id)
+            return
         symbol = self._get_symbol(cat)
         security_id = self._get_security_id(cat)
 
@@ -541,9 +568,15 @@ class ExecutionEngine:
                     else:
                         pnl = (entry_px - ltp) * qty
                     inst.realized_pnl = (inst.realized_pnl or 0.0) + pnl
-                    inst.net_qty = 0.0
-                    inst.unrealized_pnl = 0.0
-                    inst.status = "IDLE"
+                    remaining = abs(inst.net_qty or 0.0) - qty
+                    if remaining <= 0:
+                        # Full close: reset the instance
+                        inst.net_qty = 0.0
+                        inst.unrealized_pnl = 0.0
+                        inst.status = "IDLE"
+                    else:
+                        # Staged exit (e.g. TP1 50%): keep the remainder open
+                        inst.net_qty = -remaining if side == "SELL" else remaining
                     inst.last_ltp = ltp
 
                     # Log the trade
@@ -643,7 +676,9 @@ class ExecutionEngine:
     def _get_instrument_key(self, cat) -> str:
         """Best-effort Upstox instrument key."""
         underlying = cat.underlying or "NIFTY"
-        segment = cat.segment or "NSE_FNO"
+        segment = cat.segment
+        if not segment:
+            segment = "BSE_FNO" if underlying.upper().startswith("SENSEX") else "NSE_FNO"
         params = cat.default_params or {}
         strike = params.get("strike", 0)
         expiry = params.get("expiry", "")
