@@ -370,6 +370,11 @@ class ExecutionEngine:
 
     async def start(self) -> None:
         self._running = True
+        # Pre-fetch the Upstox instruments JSON so resolve_instrument_key()
+        # can map (segment, expiry, strike, opt_type) -> "SEG|numeric_id"
+        # before we collect armed keys. Without this the index is empty and
+        # every option key falls back to a readable label the WS server drops.
+        _load_upstox_instruments()
         # Start the WS feed with the instrument keys for all currently armed
         # subscriptions. New keys are re-subscribed on each tick (the
         # _ws_subscribed set in tick() below), so keys that arm later are
@@ -377,7 +382,8 @@ class ExecutionEngine:
         keys = await self._collect_armed_keys()
         await self._feed.start(keys)
         log.info("ExecutionEngine started", feed_source=self._feed.source,
-                 ws_instruments=len(keys))
+                 ws_instruments=len(keys),
+                 sample_keys=keys[:4])
 
     async def stop(self) -> None:
         self._running = False
@@ -959,23 +965,47 @@ class ExecutionEngine:
         return "NSE_FNO"
 
     def _get_instrument_key(self, cat) -> str:
-        """Best-effort Upstox instrument key."""
+        """Best-effort Upstox instrument key.
+
+        The Upstox WS V3 and REST quotes endpoints both use "SEGMENT|numeric_id"
+        format. For option strategies, the strike/expiry live in the DB
+        row's default_params, NOT in the static strategy metadata — so we
+        must read cat.default_params for strike/expiry/legs.
+        """
         underlying = cat.underlying or "NIFTY"
         segment = cat.segment
         if not segment:
             segment = "BSE_FO" if underlying.upper().startswith("SENSEX") else "NSE_FO"
-        # Upstox segments use _FO (Dhan uses _FNO) — normalize for the key.
         segment = segment.replace("_FNO", "_FO")
         params = cat.default_params or {}
+        # strike may be at top level or inside a nested legs[0] structure.
         strike = params.get("strike", 0)
+        if not strike and params.get("legs"):
+            first_leg = params["legs"][0]
+            if isinstance(first_leg, dict):
+                strike = first_leg.get("strike", strike)
         expiry = params.get("expiry", "")
-        option_type = params.get("legs", ["CE"])[0] if params.get("legs") else "CE"
+        if not expiry and params.get("legs"):
+            first_leg = params["legs"][0]
+            if isinstance(first_leg, dict):
+                expiry = first_leg.get("expiry", expiry)
+        option_type = params.get("option_type", "CE")
+        if not option_type and params.get("legs"):
+            legs = params["legs"]
+            option_type = legs[0].get("option_type", "CE") if isinstance(legs[0], dict) else "CE"
         try:
             strike_f = float(strike)
         except (TypeError, ValueError):
             strike_f = 0.0
         if strike_f > 0 and expiry:
             return resolve_instrument_key(underlying, strike_f, expiry, option_type, segment)
+        # No strike/expiry in params — use the readable label (valid for Dhan,
+        # NOT for Upstox WS; the WS server will drop it). Log so operators
+        # know to set strike/expiry via /api/v1/strategies/upsert.
+        log.warning("Instrument key unresolved (no strike/expiry in params) "
+                    "— WS subscription will be dropped",
+                    underlying=underlying, segment=segment,
+                    strike=strike, expiry=expiry, option_type=option_type)
         return f"{segment}|{strike}_{underlying}_{option_type}"
 
     def _in_market_hours(self) -> bool:
