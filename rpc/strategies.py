@@ -33,9 +33,9 @@ async def list_strategies(request: Request):
     from layers.state.models import UserSubscription, StrategyCatalog
     from sqlalchemy import select
 
-    session_factory = request.app.state.async_session_factory
+    session_factory = getattr(request.app.state, "async_session_factory", None)
     if not session_factory:
-        return {"instances": [], "note": "DB unavailable"}
+        return {"instances": [], "note": "DB unavailable — no instances to list"}
     try:
         async with session_factory() as session:
             result = await session.execute(
@@ -71,7 +71,7 @@ async def arm_strategy(req: ArmRequest, request: Request):
     from layers.state.models import UserSubscription
     from sqlalchemy import update
 
-    session_factory = request.app.state.async_session_factory
+    session_factory = getattr(request.app.state, "async_session_factory", None)
     if not session_factory:
         raise HTTPException(503, "Database unavailable — cannot arm strategy")
 
@@ -105,7 +105,7 @@ async def disarm_strategy(subscription_id: str, request: Request):
     from layers.state.models import UserSubscription
     from sqlalchemy import update
 
-    session_factory = request.app.state.async_session_factory
+    session_factory = getattr(request.app.state, "async_session_factory", None)
     if not session_factory:
         raise HTTPException(503, "Database unavailable — cannot disarm strategy")
 
@@ -138,7 +138,7 @@ async def update_params(instance_id: str, override: ParamOverride, request: Requ
     from sqlalchemy import select
     import json as _json
 
-    session_factory = request.app.state.async_session_factory
+    session_factory = getattr(request.app.state, "async_session_factory", None)
     if not session_factory:
         raise HTTPException(503, "Database unavailable")
 
