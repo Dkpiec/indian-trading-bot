@@ -29,6 +29,24 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
+# Rate-limited logging: max 1 log per key per 30s (prevents per-tick spam)
+_log_throttle: Dict[str, float] = {}
+_LOG_THROTTLE_S = 30.0
+
+
+def _log_throttled(key: str, level: str, msg: str, **kwargs) -> None:
+    now = time.time()
+    last = _log_throttle.get(key, 0.0)
+    if now - last < _LOG_THROTTLE_S:
+        return
+    _log_throttle[key] = now
+    if level == "warning":
+        log.warning(msg, **kwargs)
+    elif level == "debug":
+        log.debug(msg, **kwargs)
+    else:
+        log.info(msg, **kwargs)
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ---------------------------------------------------------------------------
@@ -273,8 +291,10 @@ class MarketDataFeed:
                             global _index_ltp_cache
                             _index_ltp_cache[symbol.upper()] = (float(spot), time.time())
                         return spot
-                    log.debug("No LTP available (contract not armed, index poll failed)",
-                              instrument_key=instrument_key, symbol=symbol)
+                    _log_throttled(
+                        f"no_ltp:{instrument_key}", "debug",
+                        "No LTP available (contract not armed, index poll failed)",
+                        instrument_key=instrument_key, symbol=symbol)
             except Exception as e:
                 log.debug("Dhan LTP poll failed", security_id=security_id, error=str(e))
 
@@ -1281,8 +1301,10 @@ class ExecutionEngine:
                 expiry = first_leg.get("expiry", expiry)
                 option_type = str(first_leg.get("option_type", option_type) or option_type).upper()
         if not strike or not expiry:
-            log.warning("security_id unset and no strike/expiry to resolve",
-                        catalog_id=cat.id, params_keys=list(params.keys()))
+            _log_throttled(
+                f"no_sid:{cat.id}", "warning",
+                "security_id unset and no strike/expiry to resolve",
+                catalog_id=cat.id, params_keys=list(params.keys()))
             return ""
         # Cache resolved ids in a process-local dict (keyed by
         # (segment, expiry, strike, option_type)) — this helper is called
@@ -1405,9 +1427,11 @@ class ExecutionEngine:
             return auto_key
         # No index LTP available yet — fall back to the readable label (WS
         # will drop it until the index LTP lands and we re-resolve).
-        log.warning("Instrument key unresolved (no strike/expiry in params, no index LTP yet)",
-                    underlying=underlying, segment=segment,
-                    strike=strike, expiry=expiry, option_type=option_type)
+        _log_throttled(
+            f"no_key:{underlying}:{option_type}", "warning",
+            "Instrument key unresolved (no strike/expiry in params, no index LTP yet)",
+            underlying=underlying, segment=segment,
+            strike=strike, expiry=expiry, option_type=option_type)
         return f"{segment}|{strike}_{underlying}_{option_type}"
 
     def _auto_resolve_index_ltp(self, underlying: str) -> bool:
