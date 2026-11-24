@@ -295,6 +295,8 @@ async def lifespan(app: FastAPI):
 
     app.state.upstox_client = upstox_client
     app.state.dhan_client = dhan_client
+    app.state.async_session_factory = async_session_factory
+    app.state.db_available = _db_available
 
     # ------------------------------------------------------------------
     # Upstox v3 WebSocket streamer (async wrapper)

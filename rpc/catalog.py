@@ -1,7 +1,7 @@
 """Strategy catalog endpoints: list, subscribe, unsubscribe."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy import select
@@ -19,12 +19,12 @@ class UnsubscribeRequest(BaseModel):
 
 
 @router.get("/")
-async def list_catalog():
+async def list_catalog(request: Request):
     """List all available strategies in the catalog."""
-    from core.main import _db_available, async_session_factory
     from layers.state.models import StrategyCatalog
 
-    if not _db_available or not async_session_factory:
+    session_factory = getattr(request.app.state, "async_session_factory", None)
+    if not session_factory:
         # Use in-memory fallback catalog
         from layers.state.fallback_db import get_catalog
         strategies = await get_catalog()
@@ -35,7 +35,7 @@ async def list_catalog():
         }
 
     try:
-        async with async_session_factory() as session:
+        async with session_factory() as session:
             result = await session.execute(
                 select(StrategyCatalog).where(StrategyCatalog.is_active == True).order_by(StrategyCatalog.id)  # noqa: E712
             )
@@ -68,14 +68,14 @@ async def list_catalog():
 
 
 @router.post("/subscribe")
-async def subscribe(req: SubscribeRequest):
+async def subscribe(req: SubscribeRequest, request: Request):
     """Subscribe to a catalog strategy (creates user_subscription)."""
-    from core.main import _db_available, async_session_factory
     from layers.state.models import StrategyCatalog, UserSubscription, User
     import uuid as _uuid
     import hashlib
 
-    if not _db_available or not async_session_factory:
+    session_factory = getattr(request.app.state, "async_session_factory", None)
+    if not session_factory:
         # Use in-memory fallback
         from layers.state.fallback_db import get_catalog_entry, subscribe as fallback_subscribe
         entry = await get_catalog_entry(req.catalog_id)
@@ -85,7 +85,7 @@ async def subscribe(req: SubscribeRequest):
         return {"status": "subscribed", "catalog_id": req.catalog_id, "subscription_id": sub_id, "fallback": True}
 
     # Verify catalog entry exists
-    async with async_session_factory() as session:
+    async with session_factory() as session:
         cat_result = await session.execute(
             select(StrategyCatalog).where(StrategyCatalog.id == req.catalog_id, StrategyCatalog.is_active == True)  # noqa: E712
         )
@@ -132,18 +132,18 @@ async def subscribe(req: SubscribeRequest):
 
 
 @router.delete("/unsubscribe/{catalog_id}")
-async def unsubscribe(catalog_id: str):
+async def unsubscribe(catalog_id: str, request: Request):
     """Remove subscription and stop associated instance."""
-    from core.main import _db_available, async_session_factory
     from layers.state.models import UserSubscription
     import uuid as _uuid
 
-    if not _db_available or not async_session_factory:
+    session_factory = getattr(request.app.state, "async_session_factory", None)
+    if not session_factory:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     user_uuid = _uuid.uuid5(_uuid.NAMESPACE_URL, "trading-bot:user:system")
 
-    async with async_session_factory() as session:
+    async with session_factory() as session:
         sub_result = await session.execute(
             select(UserSubscription).where(
                 UserSubscription.user_id == user_uuid,
@@ -162,16 +162,16 @@ async def unsubscribe(catalog_id: str):
 
 
 @router.get("/{catalog_id}/params")
-async def get_default_params(catalog_id: str):
+async def get_default_params(catalog_id: str, request: Request):
     """Get default parameters for a catalog strategy."""
-    from core.main import _db_available, async_session_factory
     from layers.state.models import StrategyCatalog
 
-    if not _db_available or not async_session_factory:
+    session_factory = getattr(request.app.state, "async_session_factory", None)
+    if not session_factory:
         return {"catalog_id": catalog_id, "default_params": {}, "status": "degraded"}
 
     try:
-        async with async_session_factory() as session:
+        async with session_factory() as session:
             result = await session.execute(
                 select(StrategyCatalog).where(StrategyCatalog.id == catalog_id)
             )
