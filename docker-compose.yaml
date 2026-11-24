@@ -1,14 +1,10 @@
 version: '3.8'
 
 services:
-  itb-app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  app:
+    image: coolify/itb-app:latest
     container_name: itb-app
     restart: unless-stopped
-    env_file:
-      - ./coolify.env
     networks:
       - coolify
 
