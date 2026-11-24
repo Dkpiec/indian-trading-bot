@@ -2,9 +2,13 @@ version: '3.8'
 
 services:
   app:
-    image: coolify/itb-app:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: itb-app
     restart: unless-stopped
+    ports:
+      - "8000:8000"
     networks:
       - coolify
 
