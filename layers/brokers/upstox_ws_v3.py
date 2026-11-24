@@ -347,7 +347,17 @@ class UpstoxWSV3:
         closed' and never recovered. Forcing a fresh streamer + socket is
         the reliable path. Call this whenever healthy() is False and the
         engine needs LTPs again.
+
+        Respects the Upstox gateway cooldown: if the last handshake
+        failed within the last 15 min, the gateway has consumed the
+        one-time ?code= token and connection slots. Reconnecting now
+        would 403 and further poison the slots. Wait for the cooldown
+        to clear instead.
         """
+        if self.in_cooldown():
+            log.debug("Upstox WS reconnect skipped — in gateway cooldown",
+                      cooldown_s=900)
+            return
         keys = instrument_keys if instrument_keys is not None else self._keys
         m = mode if mode is not None else self._mode
         if not keys:
