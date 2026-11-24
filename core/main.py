@@ -438,12 +438,12 @@ def create_app() -> FastAPI:
     # Health endpoint
     @app.get("/health")
     async def health():
-        from core.main import _db_available as db_avail, _redis_pool as redis_p
+        from core.main import _db_available as db_avail, _redis_pool as redis_p, engine as eng
         db_status = "unavailable"
-        if db_avail and engine:
+        if db_avail and eng:
             try:
                 from sqlalchemy import text
-                async with engine.connect() as conn:
+                async with eng.connect() as conn:
                     await conn.execute(text("SELECT 1"))
                 db_status = "connected"
             except Exception:
