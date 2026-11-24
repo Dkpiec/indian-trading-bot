@@ -42,6 +42,8 @@ class UpstoxWSV3:
         self._mode = "ltpc"
         self._last_tick_ts = 0.0
         self._last_subscribed_ts = 0.0
+        self._last_reconnect_ts = 0.0
+        self._reconnect_lock = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._running = False
         self._first_tick_logged = False
@@ -287,6 +289,39 @@ class UpstoxWSV3:
             return False
         return (time.time() - self._last_tick_ts) < 45.0
 
+    def _maybe_reconnect(self, instrument_keys: Optional[List[str]] = None) -> None:
+        """Auto-heal: if the WS is running but stalled (>120s without a tick),
+        tear it down and re-subscribe. The SDK's auto_reconnect does NOT detect
+        a silently dead socket (observed: last_tick frozen for 80+ min while
+        running=True). Call this from the engine's 1s tick loop so a stale
+        feed self-heals within one reconnect cycle.
+
+        Uses a 30s grace period after the last reconnect attempt so the
+        fresh socket has time to deliver at least one tick before we re-trigger.
+        """
+        import time as _time
+        now = _time.time()
+        if now - self._last_reconnect_ts < 30.0:
+            return  # grace period after a reconnect
+        # Stalled? Check: running but no tick for >120s, OR not started yet.
+        if self._running and self._last_tick_ts and (now - self._last_tick_ts) > 120.0:
+            log.warning("Upstox WS auto-reconnect: no tick for %ds — restarting streamer",
+                        int(now - self._last_tick_ts))
+            self._last_reconnect_ts = now
+            # Fire-and-forget: reconnect is async, so schedule it on the loop.
+            try:
+                loop = self._loop
+                if loop and loop.is_running():
+                    loop.create_task(self.reconnect(instrument_keys))
+                else:
+                    log.warning("Upstox WS auto-reconnect: no running loop, skipping")
+            except Exception as e:
+                log.warning("Upstox WS auto-reconnect failed: %s", str(e))
+        elif not self._running and not self._last_reconnect_ts:
+            # Never started (token present but start() not called yet).
+            # Don't auto-start here — the engine's start() handles initial connect.
+            pass
+
     async def reconnect(self, instrument_keys: Optional[List[str]] = None,
                         mode: Optional[str] = None) -> None:
         """Tear down the streamer/feeder socket and start it again.
@@ -317,6 +352,7 @@ class UpstoxWSV3:
         self._streamer = None
         self._feeder = None
         self._last_tick_ts = 0.0
+        self._last_reconnect_ts = time.time()  # mark reconnect so _maybe_reconnect backs off
         # Rebuild the streamer + socket from scratch.
         await self.start(list(keys), m)
 
