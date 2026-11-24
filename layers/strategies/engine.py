@@ -88,8 +88,18 @@ class MarketDataFeed:
         if not ws:
             return
         # Case 1: the WS adapter itself reports it is no longer running
-        # (socket closed or errored out). Re-start immediately.
+        # (socket closed or errored out). Re-start immediately — BUT
+        # respect the Upstox gateway cooldown. A failed handshake
+        # (403/401) consumes a connection slot; the gateway 403s new
+        # tokens until the slots clear (5-30 min). Reconnecting during
+        # the cooldown creates a 403 storm and further delays recovery.
         if self._ws_running and not getattr(ws, "_running", False):
+            if getattr(ws, "in_cooldown", lambda: False)():
+                log.debug("Upstox WS stopped but in gateway cooldown — waiting",
+                          instruments=len(self._ws_subscribed))
+                self._ws_running = False
+                self._ws_unhealthy_ts = 0.0
+                return
             log.warning("Upstox WS adapter stopped — restarting feed",
                         instruments=len(self._ws_subscribed))
             self._ws_running = False
@@ -117,7 +127,10 @@ class MarketDataFeed:
         try:
             await ws.reconnect(self._ws_subscribed or list(self._ws_subscribed))
             self._ws_unhealthy_ts = 0.0
-            log.info("Upstox WS reconnect issued", instruments=len(self._ws_subscribed))
+            _log_throttled(
+                "ws_reconnect", "info",
+                "Upstox WS reconnect issued",
+                instruments=len(self._ws_subscribed))
         except Exception as e:
             log.error("Upstox WS reconnect error", error=str(e))
 
@@ -205,8 +218,10 @@ class MarketDataFeed:
                     # sees the adapter stopped and re-issues start() for a
                     # fresh socket + re-subscription — keeping the WS as the
                     # primary LTP source instead of parking on the Dhan poll.
-                    log.warning("Upstox WS closed/error — restart on next tick",
-                                code=tick.get("code"), error=tick.get("error"))
+                    _log_throttled(
+                        "ws_closed", "warning",
+                        "Upstox WS closed/error — restart on next tick",
+                        code=tick.get("code"), error=tick.get("error"))
                     self._ws_running = False
                     self._ws_unhealthy_ts = 0.0
                     continue

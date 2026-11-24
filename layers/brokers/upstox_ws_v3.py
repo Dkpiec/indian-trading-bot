@@ -289,6 +289,22 @@ class UpstoxWSV3:
             return False
         return (time.time() - self._last_tick_ts) < 45.0
 
+    def in_cooldown(self) -> bool:
+        """Return True if the WS is in a post-failure cooldown window.
+
+        The Upstox gateway tracks open connections per user (2-5 slots).
+        A failed handshake consumes a slot AND the one-time ?code= token;
+        the gateway 403s new tokens until the slots clear (5-30 min).
+        This method exposes the internal _last_ws_fail_ts so the engine's
+        reconnect loop can skip attempts during the cooldown window
+        instead of hammering the endpoint and creating a 403 storm.
+        """
+        import time as _time
+        last_fail = getattr(self, "_last_ws_fail_ts", 0.0)
+        if not last_fail:
+            return False
+        return (_time.time() - last_fail) < 900  # 15-min cooldown
+
     def _maybe_reconnect(self, instrument_keys: Optional[List[str]] = None) -> None:
         """Auto-heal: if the WS is running but stalled (>120s without a tick),
         tear it down and re-subscribe. The SDK's auto_reconnect does NOT detect
