@@ -354,6 +354,20 @@ async def lifespan(app: FastAPI):
     elif tg_token and tg_chat:
         log.info("TRADING_BOT_POLLING unset — interactive bot poller disabled "
                  "(V0 engine owns this token's update stream). REST /api/v1/* still live.")
+        # Register the command menu (one-shot, no poller — no 409 conflict)
+        try:
+            import urllib.request as _ur, json as _json
+            from layers.telegram.bot_manager import MENU_COMMANDS
+            _cmds = [{"command": c.command, "description": c.description} for c in MENU_COMMANDS]
+            _data = _json.dumps({"commands": _cmds}).encode()
+            _req = _ur.Request(
+                f"https://api.telegram.org/bot{tg_token}/setMyCommands",
+                data=_data, headers={"Content-Type": "application/json"})
+            with _ur.urlopen(_req, timeout=10) as _r:
+                _ok = _r.status == 200
+            log.info("setMyCommands registered %d commands", len(_cmds), ok=_ok)
+        except Exception as e:
+            log.warning("setMyCommands failed: %s", str(e)[:200])
     else:
         log.warning("TRADING_TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — bot disabled")
 
