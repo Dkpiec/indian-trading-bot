@@ -177,7 +177,14 @@ async def lifespan(app: FastAPI):
                 else:
                     log.info("Tables already exist, skipping migration")
         except Exception as e:
-            log.warning("Migration skipped or failed", error=str(e))
+            log.warning("Alembic migration failed — attempting direct table creation", error=str(e))
+            try:
+                from layers.state.models import Base as _StateBase
+                async with engine.begin() as _conn:
+                    await _conn.run_sync(_StateBase.metadata.create_all)
+                log.info("Tables created directly via SQLAlchemy metadata.create_all")
+            except Exception as e2:
+                log.warning("Direct table creation also failed", error=str(e2))
     else:
         log.info("Database unavailable — skipping migrations (degraded mode)")
 
