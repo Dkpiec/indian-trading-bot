@@ -40,7 +40,7 @@ async def _init_database_async() -> None:
     maintenance database and creates it first.
     """
     global engine, async_session_factory, _db_available, _db_init_attempted
-    if _db_init_attempted:
+    if _db_init_attempted and _db_available:
         return
 
     _db_init_attempted = True
