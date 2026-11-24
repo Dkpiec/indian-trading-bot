@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import structlog
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -297,6 +297,10 @@ async def lifespan(app: FastAPI):
     app.state.dhan_client = dhan_client
     app.state.async_session_factory = async_session_factory
     app.state.db_available = _db_available
+    # Expose the DB engine on app.state so /health can read live values
+    # (module-level globals are captured at import time, before lifespan
+    # runs, and stay stale).
+    app.state.db_engine = engine
 
     # ------------------------------------------------------------------
     # Upstox v3 WebSocket streamer (async wrapper)
@@ -325,6 +329,7 @@ async def lifespan(app: FastAPI):
     from layers.telegram.bot_manager import BotManager
 
     redis = await get_redis()
+    app.state.redis = redis
     bot_manager = BotManager(
         session_factory=async_session_factory,
         redis=redis,
@@ -453,12 +458,15 @@ def create_app() -> FastAPI:
 
     # Health endpoint
     @app.get("/health")
-    async def health():
-        from core.main import _db_available as db_avail, _redis_pool as redis_p, engine as eng
+    async def health(request: Request):
+        # Read live state from app.state (set by lifespan after DB init),
+        # NOT module-level globals — those are captured at import time
+        # (before lifespan runs) and stay False/None even after DB comes up.
+        from sqlalchemy import text
         db_status = "unavailable"
-        if db_avail and eng:
+        eng = getattr(request.app.state, "db_engine", None)
+        if eng:
             try:
-                from sqlalchemy import text
                 async with eng.connect() as conn:
                     await conn.execute(text("SELECT 1"))
                 db_status = "connected"
@@ -466,13 +474,14 @@ def create_app() -> FastAPI:
                 db_status = "unavailable"
 
         redis_status = "unavailable"
+        redis_p = getattr(request.app.state, "redis", None)
         if redis_p and redis_p is not False:
             try:
                 await redis_p.ping()
                 redis_status = "connected"
             except Exception:
                 redis_status = "unavailable"
-        
+
         return {
             "status": "ok",
             "version": "4.0.0",
@@ -483,11 +492,12 @@ def create_app() -> FastAPI:
     
     # Status endpoint (was missing)
     @app.get("/api/v1/status")
-    async def get_status():
+    async def get_status(request: Request):
         """Get bot status: database, redis, broker clients, active strategies,
         and Upstox WS V3 feed liveness (the signal behind the Telegram
         'WS alive=' report)."""
-        from core.main import _db_available as db_avail, _redis_pool as redis_p
+        db_avail = getattr(request.app.state, "db_available", False)
+        redis_p = getattr(request.app.state, "redis", None)
         status = {
             "database": "connected" if db_avail else "unavailable",
             "redis": "connected" if redis_p and redis_p is not False else "unavailable",
@@ -557,6 +567,8 @@ def create_app() -> FastAPI:
     app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["catalog"])
     app.include_router(admin_router, prefix="/api/v1/admin", tags=["admin"])
     app.include_router(telegram_router, prefix="/api/v1/telegram", tags=["telegram"])
+    from rpc.positions import router as positions_router
+    app.include_router(positions_router, prefix="/api/v1", tags=["positions"])
 
     return app
 
