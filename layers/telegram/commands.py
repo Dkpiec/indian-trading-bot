@@ -1579,12 +1579,71 @@ async def cmd_refresh_token(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Extract key info from output
         lines = [l for l in output.split("\n") if l.strip()]
         summary = "\n".join(lines[-3:]) if lines else "Token refreshed."
-        await update.message.reply_text(
+
+        # Hot-swap the token in the running DhanClient instance so API
+        # calls work immediately without waiting for a container restart.
+        # dhan-renew.py writes to /opt/data/secrets/coolify.env; parse
+        # the fresh token and inject it into every live client reference.
+        hot_swap_ok = False
+        try:
+            import re as _re
+            env_path = "/opt/data/secrets/coolify.env"
+            with open(env_path) as _fh:
+                _raw = _fh.read()
+            _m = _re.search(r"^DHAN_ACCESS_TOKEN=(.+)$", _raw, _re.MULTILINE)
+            if _m:
+                _new_tok = _m.group(1).strip().strip("'\"")
+                if _new_tok:
+                    # Update every known reference to the DhanClient
+                    bot_mgr = context.bot_data.get("bot_manager")
+                    swapped = []
+                    for attr in ("_app_state_dhan_client", "dhan_client"):
+                        client = getattr(bot_mgr, attr, None)
+                        if client is not None and hasattr(client, "_access_token"):
+                            client._access_token = _new_tok
+                            # Reset hot-reload mtime cache so file-based
+                            # reload doesn't overwrite with a stale value
+                            if hasattr(client, "_token_file_mtime"):
+                                import os as _os
+                                try:
+                                    client._token_file_mtime = _os.path.getmtime(env_path)
+                                except OSError:
+                                    pass
+                            if hasattr(client, "_last_token_check"):
+                                client._last_token_check = 0.0
+                            swapped.append(attr)
+                    # Also update app_state if stored separately
+                    app_state = context.bot_data.get("app_state", {})
+                    if isinstance(app_state, dict):
+                        ac = app_state.get("dhan_client")
+                        if ac is not None and hasattr(ac, "_access_token"):
+                            ac._access_token = _new_tok
+                            if hasattr(ac, "_token_file_mtime"):
+                                import os as _os
+                                try:
+                                    ac._token_file_mtime = _os.path.getmtime(env_path)
+                                except OSError:
+                                    pass
+                            if hasattr(ac, "_last_token_check"):
+                                ac._last_token_check = 0.0
+                            swapped.append("app_state.dhan_client")
+                    hot_swap_ok = len(swapped) > 0
+                    if hot_swap_ok:
+                        log.info(
+                            "Dhan token hot-swapped in-memory",
+                            slots=swapped,
+                            token_prefix=_new_tok[:12],
+                        )
+        except Exception as e:
+            log.warning("In-memory token hot-swap failed", error=str(e))
+
+        status_msg = (
             f"✅ Dhan token refreshed!\n\n{summary}\n\n"
-            "⚠️ Redeploy the service to pick up the new token.\n"
-            "Use Coolify dashboard or ask me to redeploy."
+            + ("🔄 Token applied live — no restart needed." if hot_swap_ok
+               else "⚠️ Could not hot-swap in memory. Redeploy to apply.")
         )
-        log.info("Dhan token refreshed via /refreshtoken command")
+        await update.message.reply_text(status_msg)
+        log.info("Dhan token refreshed via /refreshtoken command", hot_swapped=hot_swap_ok)
     except subprocess.TimeoutExpired:
         await update.message.reply_text("❌ Token refresh timed out (60s).")
     except Exception as e:
