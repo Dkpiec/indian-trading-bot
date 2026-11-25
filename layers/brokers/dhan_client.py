@@ -30,13 +30,19 @@ class DhanClient(BrokerBase):
     read and swapped in atomically.
     """
 
-    # Check the credential file at most once every 60 seconds. Token
+    # Check the credential sources at most once every 60 seconds. Token
     # renewals happen once per day at 08:35 IST, so this interval catches
     # every renewal within one tick cycle while keeping I/O negligible.
     _TOKEN_CHECK_INTERVAL = 60.0
 
-    # Disk paths where dhan-renew.py writes the refreshed token, in
-    # priority order. Matches the lookup order in core/main.py lifespan.
+    # Where a Dhan access token can live. The refresh tool (dhan-renew.py)
+    # writes the newest token to the disk files; Coolify may ALSO inject a
+    # (possibly stale) DHAN_ACCESS_TOKEN into the container's environment.
+    # The previous bug: the container started with the env token, but the
+    # hot-reload only ever read the disk files, so a stale env token was
+    # never corrected -> persistent 401 "Invalid_Authentication".
+    # We now treat ALL of these as candidate sources and always keep the
+    # freshest *valid* one (by JWT expiry).
     _TOKEN_FILES = (
         "/app/coolify.env",
         "/opt/data/trading-engine/coolify.env",
@@ -45,90 +51,117 @@ class DhanClient(BrokerBase):
 
     def __init__(self, *, client_id: str, access_token: str, timeout: float = 10.0):
         self._client_id = client_id
-        self._access_token = access_token
         self._http = httpx.AsyncClient(timeout=timeout)
         # Per-instance failure state (see class comment on _INDEX_POLL_RETRY_S).
         self._index_poll_disabled: Dict[str, float] = {}
         self._yahoo_ltp_cache: Dict[str, tuple] = {}
         self._YAHOO_MIN_INTERVAL = 30.0
-        # Hot-reload state: track the mtime of the credential file we last
-        # read so we only re-read when it actually changes.
-        self._token_file_mtime: float = 0.0
-        self._last_token_check: float = 0.0
-        # Seed the mtime from whichever file currently holds our token
-        self._seed_token_file_mtime()
+        # Hot-reload state.
+        self._last_token_scan: float = 0.0
+        # Start with the caller-supplied token (usually the env var), but
+        # immediately reconcile it against every source so we begin with the
+        # freshest valid token rather than a possibly-stale env one.
+        self._access_token = self._resolve_freshest_token(access_token)
+        log.info(
+            "Dhan client initialised",
+            token_prefix=self._access_token[:12] if self._access_token else "(none)",
+        )
 
-    def _seed_token_file_mtime(self) -> None:
-        """Record the current mtime of the credential file holding our token."""
+    # ------------------------------------------------------------------
+    # Token source scanning (env + disk files, freshest-valid wins)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _jwt_exp(token: Optional[str]) -> float:
+        """Decode a Dhan JWT's exp claim -> unix ts, or 0 if not parseable.
+
+        Dhan access tokens are JWTs (issuer "dhan"). exp is the most reliable
+        signal of which token is newest; it never needs a network call.
+        """
+        import base64
+        import json as _json
+        if not token or "." not in token:
+            return 0.0
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = _json.loads(base64.urlsafe_b64decode(payload))
+            return float(claims.get("exp", 0) or 0)
+        except Exception:
+            return 0.0
+
+    def _candidate_tokens(self) -> Dict[str, str]:
+        """Return {source_name: token} for every available source.
+
+        Sources: the running environment variable, and each disk file the
+        renew tool writes. Only non-empty tokens are returned.
+        """
         import os as _os
+        out: Dict[str, str] = {}
+        env_tok = _os.environ.get("DHAN_ACCESS_TOKEN", "").strip()
+        if env_tok:
+            out["env"] = env_tok
         for path in self._TOKEN_FILES:
-            try:
-                if _os.path.exists(path):
-                    self._token_file_mtime = _os.path.getmtime(path)
-                    return
-            except OSError:
-                continue
+            tok = self._parse_token_from_env(path)
+            if tok:
+                out[path] = tok
+        return out
 
-    def _maybe_reload_token(self) -> None:
-        """Re-read the access token from disk if the credential file changed.
+    def _resolve_freshest_token(self, fallback: str) -> str:
+        """Pick the candidate token with the latest expiry (valid beats dead).
 
-        Called before every API request. Rate-limited to once per
-        _TOKEN_CHECK_INTERVAL seconds. When the file's mtime differs from
-        the cached value, parses DHAN_ACCESS_TOKEN out of the env file and
-        swaps it in. Logs a warning on reload so operators can correlate
-        token rotations with API behaviour in logs.
+        Ties / unparseable expiry fall back to: the caller-supplied token
+        (typically the env value), then the first disk token. This is what
+        lets a freshly-minted disk token win over a stale env token without
+        a container restart.
+        """
+        cands = self._candidate_tokens()
+        if not cands and fallback:
+            return fallback
+        # Rank by exp descending; the newest valid token wins. A dead
+        # (exp in the past) token only wins if it is the only one.
+        ranked = sorted(
+            cands.items(),
+            key=lambda kv: self._jwt_exp(kv[1]),
+            reverse=True,
+        )
+        if not ranked:
+            return fallback
+        return ranked[0][1]
+
+    def _maybe_reload_token(self, force: bool = False) -> None:
+        """Reconcile the in-memory token against every source.
+
+        Called before every API request (rate-limited) and forced after a
+        401. We re-scan ALL sources (env + disk files) and swap to the
+        freshest valid token when it differs from what we hold. This is what
+        fixes the stale-env-token bug: a disk refresh now wins even when the
+        container started with an env token.
         """
         now = time.time()
-        if now - self._last_token_check < self._TOKEN_CHECK_INTERVAL:
+        if not force and now - self._last_token_scan < self._TOKEN_CHECK_INTERVAL:
             return
-        self._last_token_check = now
+        self._last_token_scan = now
 
-        import os as _os
-        for path in self._TOKEN_FILES:
-            try:
-                if not _os.path.exists(path):
-                    continue
-                mtime = _os.path.getmtime(path)
-                # Always parse the token from disk even when mtime is
-                # unchanged. Docker volume mounts can preserve mtime across
-                # host writes, and a container that started with an expired
-                # token would never detect the refresh via mtime alone.
-                # The parse is cheap (one small file read per check interval).
-                new_token = self._parse_token_from_env(path)
-                if mtime == self._token_file_mtime:
-                    # File timestamp unchanged, but still compare content:
-                    # if the in-memory token differs from what's on disk,
-                    # swap it in. This catches stale-token-at-startup and
-                    # same-second write scenarios that mtime misses.
-                    if new_token and new_token != self._access_token:
-                        old_prefix = self._access_token[:12] if self._access_token else "(none)"
-                        new_prefix = new_token[:12]
-                        self._access_token = new_token
-                        log.warning(
-                            "Dhan access token hot-reloaded (content mismatch, same mtime)",
-                            path=path,
-                            old_prefix=old_prefix,
-                            new_prefix=new_prefix,
-                        )
-                    return
-                # File changed — parse the new token
-                if new_token and new_token != self._access_token:
-                    old_prefix = self._access_token[:12] if self._access_token else "(none)"
-                    new_prefix = new_token[:12]
-                    self._access_token = new_token
-                    self._token_file_mtime = mtime
-                    log.warning(
-                        "Dhan access token hot-reloaded from disk",
-                        path=path,
-                        old_prefix=old_prefix,
-                        new_prefix=new_prefix,
-                    )
-                elif new_token:
-                    # Same token, just update mtime so we don't re-read
-                    self._token_file_mtime = mtime
-                return
-            except OSError:
-                continue
+        cands = self._candidate_tokens()
+        if not cands:
+            return
+        ranked = sorted(
+            cands.items(), key=lambda kv: self._jwt_exp(kv[1]), reverse=True,
+        )
+        best_src, best_tok = ranked[0]
+
+        if best_tok and best_tok != self._access_token:
+            old_exp = self._jwt_exp(self._access_token)
+            new_exp = self._jwt_exp(best_tok)
+            old_prefix = self._access_token[:12] if self._access_token else "(none)"
+            self._access_token = best_tok
+            log.warning(
+                "Dhan access token reconciled from source",
+                source=best_src,
+                old_expiry=int(old_exp),
+                new_expiry=int(new_exp),
+                old_prefix=old_prefix,
+            )
 
     @staticmethod
     def _parse_token_from_env(path: str) -> Optional[str]:
@@ -164,6 +197,13 @@ class DhanClient(BrokerBase):
         # /balance and the arm-gate silently failing.
         url = f"{DHAN_BASE}/fundlimit"
         resp = await self._http.get(url, headers=self._headers())
+        # 401 Invalid_Authentication: the token we hold is dead. Force a
+        # full re-scan of every source (env + disk) and retry ONCE. This is
+        # what recovers a container that started with a stale env token:
+        # the freshest disk token now takes over without a restart.
+        if resp.status_code == 401:
+            self._maybe_reload_token(force=True)
+            resp = await self._http.get(url, headers=self._headers())
         if resp.status_code != 200:
             raise RuntimeError(f"Dhan balance failed: {resp.status_code} {resp.text}")
         data = resp.json()

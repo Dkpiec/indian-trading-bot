@@ -208,6 +208,73 @@ class TestDhanClient:
         src = _src("layers/brokers/dhan_client.py")
         assert "lastTradeTime" in src
 
+    def test_no_stale_env_token_regression(self):
+        """The container must not be stuck with a stale env token.
+
+        Proof of the fix: when DHAN_ACCESS_TOKEN in the environment is dead
+        (expired) but a disk file holds a fresher valid token, the client
+        must reconcile to the disk token at construction. This is the exact
+        bug that produced persistent 401s after a container restart.
+        """
+        import base64
+        import json
+        import os
+        import tempfile
+        import time as _time
+        from unittest import mock
+        from layers.brokers.dhan_client import DhanClient
+
+        def make_jwt(exp_offset_s: int) -> str:
+            header = base64.urlsafe_b64encode(json.dumps({"alg": "HS256"}).encode()).decode()
+            payload = base64.urlsafe_b64encode(
+                json.dumps({"iss": "dhan", "exp": int(_time.time()) + exp_offset_s}).encode()
+            ).decode()
+            sig = base64.urlsafe_b64encode(b"fakesig").decode()
+            # strip padding so it looks like a compact JWT
+            return header.rstrip("=") + "." + payload.rstrip("=") + "." + sig.rstrip("=")
+
+        stale_env = make_jwt(-3600)          # expired 1h ago
+        fresh_disk = make_jwt(24 * 3600)    # valid for 24h
+
+        with tempfile.TemporaryDirectory() as td:
+            disk_path = os.path.join(td, "coolify.env")
+            with open(disk_path, "w") as f:
+                f.write(f"DHAN_ACCESS_TOKEN={fresh_disk}\n")
+
+            with mock.patch.dict(os.environ, {"DHAN_ACCESS_TOKEN": stale_env}):
+                with mock.patch.object(DhanClient, "_TOKEN_FILES", (disk_path,)):
+                    client = DhanClient(client_id="1234567", access_token=stale_env)
+                    # Must have reconciled to the fresher disk token.
+                    assert client._access_token == fresh_disk, (
+                        "stale env token must be superseded by the fresher disk token"
+                    )
+
+    def test_jwt_expiry_ranking(self):
+        import base64
+        import json
+        import time as _time
+        from layers.brokers.dhan_client import DhanClient
+
+        def make_jwt(exp_offset_s: int, marker: str) -> str:
+            h = base64.urlsafe_b64encode(json.dumps({"a": 1}).encode()).decode().rstrip("=")
+            p = base64.urlsafe_b64encode(
+                json.dumps({"exp": int(_time.time()) + exp_offset_s, "m": marker}).encode()
+            ).decode().rstrip("=")
+            s = base64.urlsafe_b64encode(b"x").decode().rstrip("=")
+            return f"{h}.{p}.{s}"
+
+        later = make_jwt(72 * 3600, "later")
+        earlier = make_jwt(1 * 3600, "earlier")
+        # Later-expiry token must rank above the earlier one.
+        assert DhanClient._jwt_exp(later) > DhanClient._jwt_exp(earlier)
+
+    def test_force_rescan_on_401_present(self):
+        src = _src("layers/brokers/dhan_client.py")
+        # get_balance must force-rescan after a 401 and retry once.
+        assert "force=True" in src
+        assert src.count("self._http.get(url") >= 2, "expect a retry after 401"
+
+
 
 # ---------------------------------------------------------------------------
 # 9. Upstox WS cancellation + queue-full logging
