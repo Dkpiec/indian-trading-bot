@@ -186,4 +186,4 @@ async def get_default_params(catalog_id: str, request: Request):
                 "status": "ok",
             }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}") from e

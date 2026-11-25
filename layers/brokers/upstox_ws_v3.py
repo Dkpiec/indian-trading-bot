@@ -403,7 +403,6 @@ class UpstoxWSV3:
         import re
         import ssl
         import socket as _socket
-        import threading
         import websocket as _ws
 
         # Cache the resolved feed URL per-streamer so reconnects reuse it.

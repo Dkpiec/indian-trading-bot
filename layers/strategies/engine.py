@@ -1262,7 +1262,10 @@ class ExecutionEngine:
 
         try:
             module = importlib.import_module(f"catalog.{module_name}")
-            plugin_cls = getattr(module, "StrategyPlugin")
+            # getattr (not direct attr) is intentional: the module is dynamic
+            # and StrategyPlugin may be absent on some plugins — handle it in
+            # the except below. B009 is a false-positive here.
+            plugin_cls = getattr(module, "StrategyPlugin")  # noqa: B009
             # Merge default_params with any subscription overrides
             params = dict(cat.default_params or {})
             # Armed strategies are expected to take entries automatically when

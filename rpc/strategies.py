@@ -91,7 +91,7 @@ async def arm_strategy(req: ArmRequest, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Failed to arm strategy: {e}")
+        raise HTTPException(500, f"Failed to arm strategy: {e}") from e
 
 
 @router.post("/disarm")
@@ -124,7 +124,7 @@ async def disarm_strategy(subscription_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Failed to disarm strategy: {e}")
+        raise HTTPException(500, f"Failed to disarm strategy: {e}") from e
 
 
 @router.put("/{instance_id}/params")
@@ -159,4 +159,4 @@ async def update_params(instance_id: str, override: ParamOverride, request: Requ
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Failed to update params: {e}")
+        raise HTTPException(500, f"Failed to update params: {e}") from e

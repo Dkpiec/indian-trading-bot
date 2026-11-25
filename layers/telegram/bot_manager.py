@@ -390,6 +390,14 @@ class BotManager:
 
             poll_count = 0
             consecutive_409 = 0
+            # Conflict-yield: if this instance keeps losing the token to another
+            # poller (sustained 409s), stop hammering getUpdates and let the
+            # other poller own it. After YIELD_AFTER_CONFLICTS straight 409s we
+            # stop the manual poll loop for this token (the app stays up; the
+            # REST surface and execution loop are unaffected — only the
+            # interactive poll for THIS token stops). A later manual
+            # start_bot() call will re-arm it.
+            YIELD_AFTER_CONFLICTS = 20
             # Force-reset: use offset=-1 on first poll to grab any pending update
             initial_offset = -1
             while self._apps.get(token) is app:
@@ -411,6 +419,23 @@ class BotManager:
                         backoff = min(consecutive_409 * 3, 30)  # 3s, 6s, 9s, ... up to 30s
                         if poll_count <= 10:
                             print(f"MANUAL_POLL 409 (conflict) — backing off {backoff}s (consecutive={consecutive_409})", flush=True)
+                        # Conflict-yield: after sustained 409s, stop this poller
+                        # so we stop fighting the token holder. The app itself
+                        # keeps running; only this token's manual poll stops.
+                        if consecutive_409 >= YIELD_AFTER_CONFLICTS:
+                            print(
+                                f"MANUAL_POLL YIELD: {consecutive_409} consecutive 409s on "
+                                f"token {token[:10]}… — another poller owns it; stopping this "
+                                f"poll loop so we stop fighting. App stays up; call start_bot() "
+                                f"to re-arm.",
+                                flush=True,
+                            )
+                            log.warning(
+                                "Manual poll yielded on sustained 409 conflict",
+                                token_prefix=token[:10],
+                                consecutive_409=consecutive_409,
+                            )
+                            break
                         await asyncio.sleep(backoff)
                         continue
 

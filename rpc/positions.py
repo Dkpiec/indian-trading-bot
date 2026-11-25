@@ -297,7 +297,7 @@ async def kill_all(request: Request):
             await session.commit()
     except Exception as e:
         log.warning("kill-all failed: %s", e)
-        raise HTTPException(500, f"Kill-all failed: {str(e)[:200]}")
+        raise HTTPException(500, f"Kill-all failed: {str(e)[:200]}") from e
 
     return {"status": "complete", "closed": closed, "errors": errors, "total": closed + len(errors)}
 

@@ -1,0 +1,23 @@
+# Pre-commit hooks for Indian Trading Bot.
+#
+# Install:  pip install pre-commit && pre-commit install
+#   or run: pre-commit run --all-files
+#
+# Mirrors the CI gate so commits are checked locally before push.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: ["--config", "ruff.toml", "--fix"]
+      - id: ruff-format
+        args: ["--config", "ruff.toml"]
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (dependency-light suite)
+        entry: python -m pytest tests/ -q
+        language: system
+        pass_filenames: false
+        always: true

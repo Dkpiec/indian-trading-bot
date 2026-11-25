@@ -1,0 +1,17 @@
+{
+  "include": ["core", "rpc", "catalog"],
+  "exclude": ["wheelhouse", "alembic", ".git", "__pycache__"],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "reportUnnecessaryTypeIgnoreComment": false,
+  "useLibraryCodeForTypes": true,
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportOptionalSubscript": "none",
+  "reportOptionalContextManager": "none",
+  "reportArgumentType": "warning",
+  "reportAttributeAccessIssue": "warning",
+  "reportUnusedImport": "warning",
+  "reportMissingModuleSource": "none"
+}

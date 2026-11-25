@@ -184,6 +184,7 @@ class MasterCredentialRouter:
 
     async def set_master_override(self, broker: str, encrypted_creds: str, scope: str = "ALL", applies_to: Optional[list] = None) -> None:
         """Set a master credential override for a broker."""
+        from sqlalchemy import select
         from layers.state.models import MasterCredential
 
         async with self._session_factory() as session:

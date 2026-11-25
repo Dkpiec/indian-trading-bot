@@ -33,7 +33,7 @@ log = structlog.get_logger(__name__)
 
 def register_handlers(app: Application, bot_manager: BotManager) -> None:
     """Register all command handlers on the given Application."""
-    from telegram.ext import MessageHandler, filters
+    from telegram.ext import filters
 
     # Store bot_manager in bot_data so handlers can access it via context.bot_data
     app.bot_data["bot_manager"] = bot_manager
@@ -690,7 +690,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         instances = inst_result.scalars().all()
 
-    lines = [f"📊 *Status*", ""]
+    lines = ["📊 *Status*", ""]
 
     if not subs:
         lines.append("No subscriptions. Use /catalog to browse.")

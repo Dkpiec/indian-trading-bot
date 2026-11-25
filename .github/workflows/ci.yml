@@ -1,0 +1,74 @@
+# Indian Trading Bot — CI
+#
+# Lint + unit tests + type-check on every push / PR. Deploy to Coolify only
+# when green (Coolify auto-deploy is gated on this check passing).
+#
+# The test suite is dependency-light (pure-logic + source inspection, see
+# tests/), so no full venv install is required.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-test-typecheck:
+    runs-on: ubuntu-latest
+    # Python 3.12 in CI (3.14 local is too new for many lint/type tool
+    # wheels on GH runners; 3.12 matches the app's target and has full
+    # support for ruff/pyright).
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install lint / test / type tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "ruff==0.5.7" "pytest==8.3.2"
+
+      # Install app deps so pyflakes + pytest resolve imports (structlog,
+      # sqlalchemy, PTB, ...). Not installed for the hard ruff/pytest gate
+      # (they're dependency-light), but pyright needs them to resolve.
+      - name: Install app requirements (for type-check)
+        run: python -m pip install -r requirements.txt
+
+      # ---------------- Lint (ruff) ----------------
+      - name: Ruff lint
+        run: ruff check . --config ruff.toml
+
+      - name: Ruff format check
+        run: ruff format --check . --config ruff.toml
+
+      # ---------------- Tests (pytest, dependency-light) ----------------
+      - name: Run pytest
+        run: python -m pytest tests/ -q
+
+      # ---------------- Type-check (pyright, ADVISORY) ----------------
+      # Advisory by design: pyright "basic" mode is noisy on this codebase's
+      # dynamic PTB/broker state access. It surfaces hints for improvement but
+      # does NOT block a deploy. ruff (bugs) + pytest (behaviour) are the hard
+      # gate. Flip this to blocking once the baseline is fixed.
+      - name: Pyright type-check (advisory)
+        continue-on-error: true
+        run: |
+          npm install -g pyright@1.1.414
+          pyright --project pyrightconfig.json
+
+      # ---------------- Deploy gate (only on main) ----------------
+      # Coolify auto-deploys on main when CI is green. This step is a
+      # no-op marker; the actual deploy happens via Coolify's webhook /
+      # auto-deploy that watches this branch's check status.
+      - name: Mark deploy-gate
+        if: github.ref == 'refs/heads/main'
+        run: echo "CI green on main — Coolify auto-deploy may proceed."
