@@ -20,7 +20,28 @@ DHAN_BASE = "https://api.dhan.co/v2"
 
 
 class DhanClient(BrokerBase):
-    """Async adapter for DhanHQ v2 REST API."""
+    """Async adapter for DhanHQ v2 REST API.
+
+    Hot-reloads the access token from disk before every API call so that
+    a background token renewal (dhan-renew.py writing to coolify.env) is
+    picked up without restarting the application. The token file is checked
+    at most once per _TOKEN_CHECK_INTERVAL seconds to avoid per-request
+    filesystem overhead; when the file's mtime changes, the new token is
+    read and swapped in atomically.
+    """
+
+    # Check the credential file at most once every 60 seconds. Token
+    # renewals happen once per day at 08:35 IST, so this interval catches
+    # every renewal within one tick cycle while keeping I/O negligible.
+    _TOKEN_CHECK_INTERVAL = 60.0
+
+    # Disk paths where dhan-renew.py writes the refreshed token, in
+    # priority order. Matches the lookup order in core/main.py lifespan.
+    _TOKEN_FILES = (
+        "/app/coolify.env",
+        "/opt/data/trading-engine/coolify.env",
+        "/opt/data/secrets/coolify.env",
+    )
 
     def __init__(self, *, client_id: str, access_token: str, timeout: float = 10.0):
         self._client_id = client_id
@@ -30,8 +51,87 @@ class DhanClient(BrokerBase):
         self._index_poll_disabled: Dict[str, float] = {}
         self._yahoo_ltp_cache: Dict[str, tuple] = {}
         self._YAHOO_MIN_INTERVAL = 30.0
+        # Hot-reload state: track the mtime of the credential file we last
+        # read so we only re-read when it actually changes.
+        self._token_file_mtime: float = 0.0
+        self._last_token_check: float = 0.0
+        # Seed the mtime from whichever file currently holds our token
+        self._seed_token_file_mtime()
+
+    def _seed_token_file_mtime(self) -> None:
+        """Record the current mtime of the credential file holding our token."""
+        import os as _os
+        for path in self._TOKEN_FILES:
+            try:
+                if _os.path.exists(path):
+                    self._token_file_mtime = _os.path.getmtime(path)
+                    return
+            except OSError:
+                continue
+
+    def _maybe_reload_token(self) -> None:
+        """Re-read the access token from disk if the credential file changed.
+
+        Called before every API request. Rate-limited to once per
+        _TOKEN_CHECK_INTERVAL seconds. When the file's mtime differs from
+        the cached value, parses DHAN_ACCESS_TOKEN out of the env file and
+        swaps it in. Logs a warning on reload so operators can correlate
+        token rotations with API behaviour in logs.
+        """
+        now = time.time()
+        if now - self._last_token_check < self._TOKEN_CHECK_INTERVAL:
+            return
+        self._last_token_check = now
+
+        import os as _os
+        for path in self._TOKEN_FILES:
+            try:
+                if not _os.path.exists(path):
+                    continue
+                mtime = _os.path.getmtime(path)
+                if mtime == self._token_file_mtime:
+                    return  # File unchanged
+                # File changed — parse the new token
+                new_token = self._parse_token_from_env(path)
+                if new_token and new_token != self._access_token:
+                    old_prefix = self._access_token[:12] if self._access_token else "(none)"
+                    new_prefix = new_token[:12]
+                    self._access_token = new_token
+                    self._token_file_mtime = mtime
+                    log.warning(
+                        "Dhan access token hot-reloaded from disk",
+                        path=path,
+                        old_prefix=old_prefix,
+                        new_prefix=new_prefix,
+                    )
+                elif new_token:
+                    # Same token, just update mtime so we don't re-read
+                    self._token_file_mtime = mtime
+                return
+            except OSError:
+                continue
+
+    @staticmethod
+    def _parse_token_from_env(path: str) -> Optional[str]:
+        """Extract DHAN_ACCESS_TOKEN from a shell-style env file."""
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k.strip() == "DHAN_ACCESS_TOKEN":
+                        v = v.strip()
+                        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                            v = v[1:-1]
+                        return v if v else None
+        except Exception:
+            return None
+        return None
 
     def _headers(self) -> dict:
+        self._maybe_reload_token()
         return {
             "access-token": self._access_token,
             "Content-Type": "application/json",
