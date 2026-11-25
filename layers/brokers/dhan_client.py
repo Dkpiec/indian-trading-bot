@@ -89,10 +89,29 @@ class DhanClient(BrokerBase):
                 if not _os.path.exists(path):
                     continue
                 mtime = _os.path.getmtime(path)
-                if mtime == self._token_file_mtime:
-                    return  # File unchanged
-                # File changed — parse the new token
+                # Always parse the token from disk even when mtime is
+                # unchanged. Docker volume mounts can preserve mtime across
+                # host writes, and a container that started with an expired
+                # token would never detect the refresh via mtime alone.
+                # The parse is cheap (one small file read per check interval).
                 new_token = self._parse_token_from_env(path)
+                if mtime == self._token_file_mtime:
+                    # File timestamp unchanged, but still compare content:
+                    # if the in-memory token differs from what's on disk,
+                    # swap it in. This catches stale-token-at-startup and
+                    # same-second write scenarios that mtime misses.
+                    if new_token and new_token != self._access_token:
+                        old_prefix = self._access_token[:12] if self._access_token else "(none)"
+                        new_prefix = new_token[:12]
+                        self._access_token = new_token
+                        log.warning(
+                            "Dhan access token hot-reloaded (content mismatch, same mtime)",
+                            path=path,
+                            old_prefix=old_prefix,
+                            new_prefix=new_prefix,
+                        )
+                    return
+                # File changed — parse the new token
                 if new_token and new_token != self._access_token:
                     old_prefix = self._access_token[:12] if self._access_token else "(none)"
                     new_prefix = new_token[:12]

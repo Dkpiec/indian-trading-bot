@@ -1567,7 +1567,7 @@ async def cmd_refresh_token(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     import subprocess
     try:
         result = subprocess.run(
-            ["python3", "/opt/data/scripts/dhan-renew.py", "--force"],
+            ["/opt/data/.venv/bin/python", "/opt/data/scripts/dhan-renew.py", "--force"],
             capture_output=True, text=True, timeout=60, cwd="/opt/data",
         )
         output = result.stdout.strip()
