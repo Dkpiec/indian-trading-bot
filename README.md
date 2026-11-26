@@ -72,3 +72,4 @@ indian-trading-bot/
 ## License
 
 Private — all rights reserved.# Trigger rebuild Thu Nov 26 06:19:28 UTC 2026
+# Force redeploy Thu Nov 26 06:41:31 UTC 2026
