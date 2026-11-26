@@ -12,6 +12,8 @@ services:
       - coolify
     env_file:
       - /opt/data/secrets/coolify.env
+    volumes:
+      - /opt/data/secrets:/opt/data/secrets:ro
     environment:
       - TRADING_BOT_POLLING=1
 networks:
