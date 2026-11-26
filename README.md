@@ -71,4 +71,4 @@ indian-trading-bot/
 
 ## License
 
-Private — all rights reserved.
+Private — all rights reserved.# Trigger rebuild Thu Nov 26 06:19:28 UTC 2026
