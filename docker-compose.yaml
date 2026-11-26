@@ -10,6 +10,8 @@ services:
       - "8000:8000"
     networks:
       - coolify
+    env_file:
+      - /opt/data/secrets/coolify.env
     environment:
       - TRADING_BOT_POLLING=1
 networks:
