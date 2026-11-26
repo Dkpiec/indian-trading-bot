@@ -3,6 +3,7 @@
 API base: https://api.upstox.com/v2
 Auth: Bearer token in Authorization header.
 """
+
 from __future__ import annotations
 
 import time

@@ -41,10 +41,12 @@ Dhan order notes
 * Exits are in lot increments: sell 1 lot (20 units) at TP1,
   trail/close remaining 1 lot (20 units) at TP2/trail/EOD.
 """
+
 from __future__ import annotations
 
 import json
 import structlog
+
 log = structlog.get_logger(__name__)
 import threading
 import urllib.request
@@ -53,22 +55,22 @@ from typing import Any, Dict, Optional
 
 # --- Backtest winner config (V4.1g) ---
 DEFAULT_CONFIG = {
-    "om": 0.20,          # OR width multiplier (wick threshold = ow * om)
-    "wick": 5.0,         # sweep wick threshold in points
-    "sl": 0.12,          # stop loss 12%
-    "tp1": 0.50,         # first target 50% (sell 1 lot)
-    "tp2": 1.00,         # final target 100% (close remaining lot)
-    "hold": 40,          # max bars to hold before time stop
-    "or_min": 0.40,     # OR width min (fraction of spot)
-    "or_max": 0.90,     # OR width max (fraction of spot)
-    "rej": 0.45,        # rejection depth fraction of sweep wick
-    "mvix": 0.10,       # minimum VIX (sigma) filter
-    "mom": True,        # momentum confirmation (next bar closes in direction)
-    "lot": 40,          # total units per entry (2 lots of 20)
-    "lot_units": 20,    # SENSEX lot size
-    "tp1_frac": 0.50,   # fraction of position sold at TP1 (1 lot of 2)
-    "trail_atr": 0.5,   # trailing stop ATR multiplier
-    "dte": 5.0,         # days to expiry
+    "om": 0.20,  # OR width multiplier (wick threshold = ow * om)
+    "wick": 5.0,  # sweep wick threshold in points
+    "sl": 0.12,  # stop loss 12%
+    "tp1": 0.50,  # first target 50% (sell 1 lot)
+    "tp2": 1.00,  # final target 100% (close remaining lot)
+    "hold": 40,  # max bars to hold before time stop
+    "or_min": 0.40,  # OR width min (fraction of spot)
+    "or_max": 0.90,  # OR width max (fraction of spot)
+    "rej": 0.45,  # rejection depth fraction of sweep wick
+    "mvix": 0.10,  # minimum VIX (sigma) filter
+    "mom": True,  # momentum confirmation (next bar closes in direction)
+    "lot": 40,  # total units per entry (2 lots of 20)
+    "lot_units": 20,  # SENSEX lot size
+    "tp1_frac": 0.50,  # fraction of position sold at TP1 (1 lot of 2)
+    "trail_atr": 0.5,  # trailing stop ATR multiplier
+    "dte": 5.0,  # days to expiry
 }
 
 # SENSEX 5m candle source: Dhan live quote for the SENSEX index (free, not
@@ -97,6 +99,7 @@ def _fetch_sensex_5m_candles() -> list:
     failed poll simply keeps the bars accumulated so far.
     """
     import time
+
     now = time.time()
     with _sensex_lock:
         need_poll = now - _sensex_bars["poll_ts"] >= _SENSEX_POLL_S
@@ -131,9 +134,11 @@ def _fetch_sensex_5m_candles() -> list:
                     else:
                         bars.append((bucket, spot, spot, spot, spot))
                     # Drop bars older than one trading day (restart safety).
-                    day_start = datetime.now(timezone.utc).replace(
-                        hour=0, minute=0, second=0, microsecond=0
-                    ).timestamp()
+                    day_start = (
+                        datetime.now(timezone.utc)
+                        .replace(hour=0, minute=0, second=0, microsecond=0)
+                        .timestamp()
+                    )
                     _sensex_bars["bars"] = [b for b in bars if b[0] >= day_start - 300]
         except Exception as e:
             log.warning("SENSEX SLHUNT index poll failed", error=str(e))
@@ -166,12 +171,21 @@ class StrategyPlugin:
     def _override_from_params(params: dict) -> dict:
         """Allow operator overrides for the backtest winner config via params."""
         mapping = {
-            "om": "slh_om", "wick": "slh_wick", "sl": "slh_sl",
-            "tp1": "slh_tp1", "tp2": "slh_tp2", "hold": "slh_hold",
-            "or_min": "slh_or_min", "or_max": "slh_or_max",
-            "rej": "slh_rej", "lot": "slh_lot", "lot_units": "slh_lot_units",
-            "mvix": "slh_mvix", "mom": "slh_mom",
-            "tp1_frac": "slh_tp1_frac", "trail_atr": "slh_trail_atr",
+            "om": "slh_om",
+            "wick": "slh_wick",
+            "sl": "slh_sl",
+            "tp1": "slh_tp1",
+            "tp2": "slh_tp2",
+            "hold": "slh_hold",
+            "or_min": "slh_or_min",
+            "or_max": "slh_or_max",
+            "rej": "slh_rej",
+            "lot": "slh_lot",
+            "lot_units": "slh_lot_units",
+            "mvix": "slh_mvix",
+            "mom": "slh_mom",
+            "tp1_frac": "slh_tp1_frac",
+            "trail_atr": "slh_trail_atr",
             "dte": "slh_dte",
         }
         out = {}
@@ -293,8 +307,9 @@ class StrategyPlugin:
             return None
         return self._sweep_rejection_check(state, p)
 
-    def _exits(self, net_qty: float, entry: float, opt_ltp: float,
-               p: dict, state: dict) -> Optional[dict]:
+    def _exits(
+        self, net_qty: float, entry: float, opt_ltp: float, p: dict, state: dict
+    ) -> Optional[dict]:
         """Staged exit on the held SENSEX option position.
 
         tp1 (50%): sell 1 lot (20 units) + move SL to breakeven + trail 0.5 ATR.
@@ -353,7 +368,7 @@ class StrategyPlugin:
                     "action": "EXIT",
                     "side": "SELL",
                     "qty": lot_units,  # sell 1 lot only
-                    "tp1_hit": True,   # engine marks TP1 as hit
+                    "tp1_hit": True,  # engine marks TP1 as hit
                     "reason": f"SLHUNT SENSEX: TP1 hit (+{pct*100:.1f}% >= {tp1*100:.0f}%) — sell 1 lot, trail remaining at BE+{trail_atr}ATR",
                 }
 
@@ -371,6 +386,7 @@ class StrategyPlugin:
         # stops at exactly 15:30, so a 15:30 exit could never be placed;
         # 15:15 leaves the last 15 market minutes for the order to fill.
         from zoneinfo import ZoneInfo
+
         now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
         if now_ist.hour * 60 + now_ist.minute >= (15 * 60 + 15):
             return {

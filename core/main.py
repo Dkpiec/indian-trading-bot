@@ -1,4 +1,5 @@
 """FastAPI application factory — Indian Trading Bot control plane."""
+
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +21,7 @@ log = structlog.get_logger(__name__)
 def _run_alembic_upgrade(cfg) -> None:
     """Run alembic upgrade in a sync context (called from thread pool)."""
     from alembic import command
+
     command.upgrade(cfg, "head")
 
 
@@ -46,7 +48,7 @@ async def _init_database_async() -> None:
     _db_init_attempted = True
     try:
         db_url = settings.database_url
-        db_name = db_url.rstrip('/').split('/')[-1]
+        db_name = db_url.rstrip("/").split("/")[-1]
 
         from sqlalchemy import text
 
@@ -78,12 +80,15 @@ async def _init_database_async() -> None:
             pool_pre_ping=True,
             echo=False,
         )
-        async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async_session_factory = async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False
+        )
         _db_available = True
         log.info("Database engine initialized", url=db_url.split("@")[-1])
     except Exception as e:
         log.warning("Database engine init failed — running in degraded mode", error=str(e))
         _db_available = False
+
 
 # Database init is deferred to lifespan (async-safe)
 # _db_available is set to True after _init_database_async() succeeds in lifespan
@@ -97,7 +102,10 @@ async def get_redis():
     if _redis_pool is None:
         try:
             import redis.asyncio as aioredis
-            _redis_pool = aioredis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+
+            _redis_pool = aioredis.from_url(
+                settings.redis_url, encoding="utf-8", decode_responses=True
+            )
         except Exception as e:
             log.warning("Redis pool init failed — running without Redis", error=str(e))
             _redis_pool = False  # sentinel: tried and failed
@@ -115,6 +123,7 @@ cred_router = None
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -150,29 +159,31 @@ async def lifespan(app: FastAPI):
     if _db_available and engine is not None:
         try:
             from sqlalchemy import text
+
             async with engine.begin() as conn:
                 # Check if tables already exist (idempotent first-run check)
-                result = await conn.execute(text(
-                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'users'"
-                ))
+                result = await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'users'"
+                    )
+                )
                 table_exists = result.scalar() == 1
 
                 if not table_exists:
                     # Run the initial migration directly (avoids alembic CLI's asyncio.run)
                     from alembic.config import Config
                     import asyncio as _asyncio
+
                     alembic_cfg = Config("alembic.ini")
                     alembic_cfg.set_main_option("sqlalchemy.url", settings.database_url)
 
                     # alembic command.upgrade is sync; run in a thread to avoid
                     # blocking the event loop and avoid nested asyncio.run()
                     import concurrent.futures
+
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                         loop = _asyncio.get_event_loop()
-                        await loop.run_in_executor(
-                            pool,
-                            lambda: _run_alembic_upgrade(alembic_cfg)
-                        )
+                        await loop.run_in_executor(pool, lambda: _run_alembic_upgrade(alembic_cfg))
                     log.info("Database migrations applied")
                 else:
                     log.info("Tables already exist, skipping migration")
@@ -180,6 +191,7 @@ async def lifespan(app: FastAPI):
             log.warning("Alembic migration failed — attempting direct table creation", error=str(e))
             try:
                 from layers.state.models import Base as _StateBase
+
                 async with engine.begin() as _conn:
                     await _conn.run_sync(_StateBase.metadata.create_all)
                 log.info("Tables created directly via SQLAlchemy metadata.create_all")
@@ -194,22 +206,26 @@ async def lifespan(app: FastAPI):
     if _db_available:
         try:
             from sqlalchemy import text as _text
+
             async with async_session_factory() as session:
                 # Clear any stale sample/old strategies that don't match live roster
-                await session.execute(_text("""
+                await session.execute(
+                    _text("""
                     DELETE FROM strategy_catalog WHERE id IN (
                         'nifty-orb-v1', 'banknifty-momentum-v1', 'nifty-mean-revert-v1',
                         'dhan_v6e_nifty', 'dhan_v6e_nifty_pe', 'nifty_slhunt_reversal',
                         'orb_banknifty_fyers', 'orb_banknifty_fyers_pe', 'orb_sensex_dhan',
                         'orb_sensex_dhan_pe', 'sensex_slhunt_ce', 'sensex_slhunt_pe'
                     )
-                """))
+                """)
+                )
                 await session.commit()
 
                 result = await session.execute(_text("SELECT COUNT(*) FROM strategy_catalog"))
                 count = result.scalar() or 0
                 if count == 0:
-                    await session.execute(_text("""
+                    await session.execute(
+                        _text("""
                         INSERT INTO strategy_catalog (id, display_name, description, plugin_file, underlying, segment, strategy_type, default_params, is_active, version, created_at, updated_at)
                         VALUES
                         ('NIFTY101', 'NIFTY ORB v6e', 'NIFTY ORB v6e CE+PE legs', 'dhan_v6e_nifty.py', 'NIFTY', 'NSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '6e', NOW(), NOW()),
@@ -218,18 +234,23 @@ async def lifespan(app: FastAPI):
                         ('SENSEX101', 'SENSEX ORB Invalidation', 'SENSEX ORB Invalidation CE+PE legs', 'orb_sensex_dhan.py', 'SENSEX', 'BSE_FNO', 'orb', '{"legs":["CE","PE"]}', true, '5', NOW(), NOW()),
                         ('SENSEX102', 'SENSEX SL-Hunt V4.1g', 'SENSEX SL-Hunt V4.1g CE legs', 'sensex_slhunt_ce.py', 'SENSEX', 'BSE_FNO', 'slhunt', '{"legs":["CE"]}', true, '4.1g', NOW(), NOW())
                         ON CONFLICT (id) DO NOTHING
-                    """))
-                    log.info("Seeded 5 merged strategies (CE+PE legs) from Hermes multi-broker engine")
+                    """)
+                    )
+                    log.info(
+                        "Seeded 5 merged strategies (CE+PE legs) from Hermes multi-broker engine"
+                    )
                 else:
                     log.info(f"Strategy catalog already has {count} entries, skipping seed")
                 # Fix the SENSEX segment in-place on every startup: the
                 # original seed used NSE_FNO, but SENSEX options live on
                 # BSE_FNO (Dhan) / BSE_FO (Upstox). This UPDATE fixes
                 # existing DB rows that were seeded with the wrong segment.
-                await session.execute(_text(
-                    "UPDATE strategy_catalog SET segment = 'BSE_FNO' "
-                    "WHERE underlying = 'SENSEX' AND segment = 'NSE_FNO'"
-                ))
+                await session.execute(
+                    _text(
+                        "UPDATE strategy_catalog SET segment = 'BSE_FNO' "
+                        "WHERE underlying = 'SENSEX' AND segment = 'NSE_FNO'"
+                    )
+                )
                 await session.commit()
         except Exception as e:
             log.warning("Strategy catalog seed skipped", error=str(e))
@@ -259,6 +280,7 @@ async def lifespan(app: FastAPI):
         if settings_val:
             return settings_val
         import os
+
         for path in (
             "/app/coolify.env",
             "/opt/data/trading-engine/coolify.env",
@@ -288,10 +310,18 @@ async def lifespan(app: FastAPI):
 
     if dhan_token and dhan_client_id:
         dhan_client = DhanClient(client_id=dhan_client_id, access_token=dhan_token)
-        log.info("Dhan REST client initialized", source="settings" if (settings.dhan_access_token and settings.dhan_client_id) else "disk/env")
+        log.info(
+            "Dhan REST client initialized",
+            source="settings"
+            if (settings.dhan_access_token and settings.dhan_client_id)
+            else "disk/env",
+        )
     else:
-        log.warning("DHAN credentials incomplete — Dhan REST disabled",
-                    token_set=bool(dhan_token), client_id_set=bool(dhan_client_id))
+        log.warning(
+            "DHAN credentials incomplete — Dhan REST disabled",
+            token_set=bool(dhan_token),
+            client_id_set=bool(dhan_client_id),
+        )
 
     app.state.upstox_client = upstox_client
     app.state.dhan_client = dhan_client
@@ -345,6 +375,7 @@ async def lifespan(app: FastAPI):
     # The V0 engine owns the interactive bot; ITB disables its poller unless
     # explicitly opted in with TRADING_BOT_POLLING=1 (ITB still serves /api/v1/*).
     import os as _os
+
     poll_enabled = _os.environ.get("TRADING_BOT_POLLING", "0") == "1"
     if tg_token and tg_chat and poll_enabled:
         try:
@@ -357,17 +388,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.error("Telegram bot start failed", error=str(e))
     elif tg_token and tg_chat:
-        log.info("TRADING_BOT_POLLING unset — interactive bot poller disabled "
-                 "(V0 engine owns this token's update stream). REST /api/v1/* still live.")
+        log.info(
+            "TRADING_BOT_POLLING unset — interactive bot poller disabled "
+            "(V0 engine owns this token's update stream). REST /api/v1/* still live."
+        )
         # Register the command menu (one-shot, no poller — no 409 conflict)
         try:
             import urllib.request as _ur, json as _json
             from layers.telegram.bot_manager import MENU_COMMANDS
+
             _cmds = [{"command": c.command, "description": c.description} for c in MENU_COMMANDS]
             _data = _json.dumps({"commands": _cmds}).encode()
             _req = _ur.Request(
                 f"https://api.telegram.org/bot{tg_token}/setMyCommands",
-                data=_data, headers={"Content-Type": "application/json"})
+                data=_data,
+                headers={"Content-Type": "application/json"},
+            )
             with _ur.urlopen(_req, timeout=10) as _r:
                 _ok = _r.status == 200
             log.info("setMyCommands registered %d commands", len(_cmds), ok=_ok)
@@ -440,6 +476,7 @@ async def lifespan(app: FastAPI):
 # App factory
 # ---------------------------------------------------------------------------
 
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Indian Trading Bot",
@@ -463,6 +500,7 @@ def create_app() -> FastAPI:
         # NOT module-level globals — those are captured at import time
         # (before lifespan runs) and stay False/None even after DB comes up.
         from sqlalchemy import text
+
         db_status = "unavailable"
         eng = getattr(request.app.state, "db_engine", None)
         if eng:
@@ -489,7 +527,7 @@ def create_app() -> FastAPI:
             "database": db_status,
             "redis": redis_status,
         }
-    
+
     # Status endpoint (was missing)
     @app.get("/api/v1/status")
     async def get_status(request: Request):
@@ -501,8 +539,12 @@ def create_app() -> FastAPI:
         status = {
             "database": "connected" if db_avail else "unavailable",
             "redis": "connected" if redis_p and redis_p is not False else "unavailable",
-            "dhan_client": bool(app.state.dhan_client) if hasattr(app.state, "dhan_client") else False,
-            "upstox_client": bool(app.state.upstox_client) if hasattr(app.state, "upstox_client") else False,
+            "dhan_client": bool(app.state.dhan_client)
+            if hasattr(app.state, "dhan_client")
+            else False,
+            "upstox_client": bool(app.state.upstox_client)
+            if hasattr(app.state, "upstox_client")
+            else False,
             "active_strategies": 0,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -512,16 +554,23 @@ def create_app() -> FastAPI:
             status["upstox_ws"] = {
                 "running": ws._running,
                 "healthy": bool(getattr(ws, "healthy", lambda: False)()),
-                "last_tick_age_s": round(time.time() - ws._last_tick_ts, 1) if ws._last_tick_ts else None,
+                "last_tick_age_s": round(time.time() - ws._last_tick_ts, 1)
+                if ws._last_tick_ts
+                else None,
                 "subscribed_instruments": len(getattr(ws, "_keys", []) or []),
             }
         else:
-            status["upstox_ws"] = {"running": False, "healthy": False, "reason": "no adapter (no token)"}
+            status["upstox_ws"] = {
+                "running": False,
+                "healthy": False,
+                "reason": "no adapter (no token)",
+            }
         # Count active strategy instances if DB available
         if db_avail:
             try:
                 from sqlalchemy import select, func
                 from layers.state.models import StrategyInstance
+
                 async with async_session_factory() as session:
                     result = await session.execute(
                         select(func.count()).where(StrategyInstance.status == "RUNNING")
@@ -530,7 +579,7 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
         return status
-    
+
     # Balance endpoint (was missing)
     @app.get("/api/v1/balance")
     async def get_balance():
@@ -568,6 +617,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_router, prefix="/api/v1/admin", tags=["admin"])
     app.include_router(telegram_router, prefix="/api/v1/telegram", tags=["telegram"])
     from rpc.positions import router as positions_router
+
     app.include_router(positions_router, prefix="/api/v1", tags=["positions"])
 
     return app
@@ -579,6 +629,7 @@ app = create_app()
 # ---------------------------------------------------------------------------
 # Strategy Supervisor Loop (runs all armed user strategies concurrently)
 # ---------------------------------------------------------------------------
+
 
 async def _supervisor_loop(engine=None):
     """Main loop: delegates to the execution engine every second.

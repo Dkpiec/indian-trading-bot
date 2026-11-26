@@ -6,6 +6,7 @@ Memory-efficient lifecycle:
   still used by others. Uses redis.delete() + DB count instead of redis.keys() (O(N) bug).
 - chat_id → user_id mapping stored in Redis for fast routing in command handlers.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -140,9 +141,7 @@ class BotManager:
         """
         async with self._lock:
             # Remove chat mappings for this user
-            chat_ids_to_remove = [
-                cid for cid, uid in self._chat_user_map.items() if uid == user_id
-            ]
+            chat_ids_to_remove = [cid for cid, uid in self._chat_user_map.items() if uid == user_id]
             for cid in chat_ids_to_remove:
                 if self._redis:
                     try:
@@ -286,13 +285,18 @@ class BotManager:
                 "Telegram update processing error",
                 error=str(context.error),
                 update_type=type(update).__name__,
-                chat_id=getattr(getattr(update, 'effective_chat', None), 'id', '?'),
+                chat_id=getattr(getattr(update, "effective_chat", None), "id", "?"),
             )
+
         app.add_error_handler(_error_handler)
 
         # Register all command handlers SYNCHRONOUSLY before initialize
         register_handlers(app, self)
-        handler_count = sum(len(v) for v in app.handlers.values()) if isinstance(app.handlers, dict) else len(app.handlers)
+        handler_count = (
+            sum(len(v) for v in app.handlers.values())
+            if isinstance(app.handlers, dict)
+            else len(app.handlers)
+        )
         print(f"HANDLERS_SYNC_REGISTERED count={handler_count} token={token[:10]}", flush=True)
         log.info("Handlers registered synchronously", token_prefix=token[:10], count=handler_count)
 
@@ -307,6 +311,7 @@ class BotManager:
             await app.bot.set_my_commands(MENU_COMMANDS)
             # Scoped commands via raw API (PTB v21.9 doesn't expose scope param cleanly)
             import httpx as _httpx
+
             async with _httpx.AsyncClient(timeout=10.0) as _client:
                 for _scope_type in ["all_private_chats", "all_group_chats"]:
                     await _client.post(
@@ -328,9 +333,7 @@ class BotManager:
 
         # Use manual polling loop instead of app.updater.start_polling()
         # PTB v21.9 dispatcher silently fails to route updates in containerized uvicorn
-        self._manual_poll_task = asyncio.create_task(
-            self._manual_polling_loop(app, token)
-        )
+        self._manual_poll_task = asyncio.create_task(self._manual_polling_loop(app, token))
 
         log.info("Bot manual polling started", token_prefix=token[:10])
         return app
@@ -366,6 +369,7 @@ class BotManager:
             # Column may not exist yet (migration not applied)
             log.warning("DB token hash count failed (column missing?)", error=str(e))
             return 0
+
     async def _manual_polling_loop(self, app: Application, token: str) -> None:
         """Fallback: manually poll getUpdates and dispatch to registered handlers.
 
@@ -383,7 +387,10 @@ class BotManager:
             # Network diagnostic: verify api.telegram.org is reachable
             try:
                 diag_resp = await client.get(f"https://api.telegram.org/bot{token}/getMe")
-                print(f"NET_DIAG getMe HTTP {diag_resp.status_code} body={diag_resp.text[:200]}", flush=True)
+                print(
+                    f"NET_DIAG getMe HTTP {diag_resp.status_code} body={diag_resp.text[:200]}",
+                    flush=True,
+                )
             except Exception as diag_err:
                 print(f"NET_DIAG FAIL: {type(diag_err).__name__}: {diag_err}", flush=True)
                 log.warning("Network diagnostic to api.telegram.org failed", error=str(diag_err))
@@ -411,14 +418,20 @@ class BotManager:
                         params={"offset": current_offset, "timeout": 1},
                     )
                     if poll_count <= 5:
-                        print(f"MANUAL_POLL HTTP {resp.status_code} headers={dict(resp.headers)} body={resp.text[:300]}", flush=True)
+                        print(
+                            f"MANUAL_POLL HTTP {resp.status_code} headers={dict(resp.headers)} body={resp.text[:300]}",
+                            flush=True,
+                        )
 
                     # Handle 409 Conflict: another poller is using this token
                     if resp.status_code == 409:
                         consecutive_409 += 1
                         backoff = min(consecutive_409 * 3, 30)  # 3s, 6s, 9s, ... up to 30s
                         if poll_count <= 10:
-                            print(f"MANUAL_POLL 409 (conflict) — backing off {backoff}s (consecutive={consecutive_409})", flush=True)
+                            print(
+                                f"MANUAL_POLL 409 (conflict) — backing off {backoff}s (consecutive={consecutive_409})",
+                                flush=True,
+                            )
                         # Conflict-yield: after sustained 409s, stop this poller
                         # so we stop fighting the token holder. The app itself
                         # keeps running; only this token's manual poll stops.
@@ -444,29 +457,46 @@ class BotManager:
                     data = resp.json()
                     updates = data.get("result", [])
                     if updates:
-                        print(f"MANUAL_POLL got {len(updates)} updates, first_id={updates[0].get('update_id')}", flush=True)
+                        print(
+                            f"MANUAL_POLL got {len(updates)} updates, first_id={updates[0].get('update_id')}",
+                            flush=True,
+                        )
 
                     for update in updates:
                         update_id = update.get("update_id", 0)
                         offset = update_id + 1
                         msg_text = update.get("message", {}).get("text", "")
-                        print(f"MANUAL_POLL processing update_id={update_id} text={msg_text!r}", flush=True)
+                        print(
+                            f"MANUAL_POLL processing update_id={update_id} text={msg_text!r}",
+                            flush=True,
+                        )
 
                         # Build a PTB Update object manually
                         from telegram import Update as PTBUpdate
+
                         ptb_update = PTBUpdate.de_json(update, bot=app.bot)
-                        print(f"MANUAL_POLL de_json ok type={type(ptb_update).__name__} has_cmd={ptb_update.message is not None}", flush=True)
+                        print(
+                            f"MANUAL_POLL de_json ok type={type(ptb_update).__name__} has_cmd={ptb_update.message is not None}",
+                            flush=True,
+                        )
 
                         # Use PTB's own process_update which correctly initializes
                         # CallbackContext (user_data, chat_data, bot_data, args, etc.)
                         proc_err = None
                         try:
                             await app.process_update(ptb_update)
-                            print(f"MANUAL_POLL process_update complete for text={msg_text!r}", flush=True)
+                            print(
+                                f"MANUAL_POLL process_update complete for text={msg_text!r}",
+                                flush=True,
+                            )
                         except Exception as _pe:
                             proc_err = _pe
-                            print(f"MANUAL_POLL PROCESS_ERROR text={msg_text!r} err={proc_err}", flush=True)
+                            print(
+                                f"MANUAL_POLL PROCESS_ERROR text={msg_text!r} err={proc_err}",
+                                flush=True,
+                            )
                             import traceback
+
                             traceback.print_exc()
 
                         # Fallback: if process_update completed but the handler
@@ -490,7 +520,11 @@ class BotManager:
                         # /ping which are guaranteed to be simple.
                         if not msg_text:
                             continue
-                        cmd_name = msg_text.lstrip("/").split()[0].lower() if msg_text.lstrip("/").split() else ""
+                        cmd_name = (
+                            msg_text.lstrip("/").split()[0].lower()
+                            if msg_text.lstrip("/").split()
+                            else ""
+                        )
                         if cmd_name in ("help", "ping") and proc_err is None:
                             # Send a raw-HTTP reply as fallback for critical
                             # commands that must always respond
@@ -503,19 +537,27 @@ class BotManager:
                                     }
                                     text = fallback_texts.get(cmd_name, "")
                                     if text:
-                                        fb_data = json.dumps({
-                                            "chat_id": chat_id,
-                                            "text": text,
-                                        }).encode()
+                                        fb_data = json.dumps(
+                                            {
+                                                "chat_id": chat_id,
+                                                "text": text,
+                                            }
+                                        ).encode()
                                         fb_req = urllib.request.Request(
                                             f"https://api.telegram.org/bot{token}/sendMessage",
                                             data=fb_data,
                                             headers={"Content-Type": "application/json"},
                                         )
                                         with urllib.request.urlopen(fb_req, timeout=10) as fb_resp:
-                                            print(f"MANUAL_POLL fallback sent for /{cmd_name} status={fb_resp.status_code}", flush=True)
+                                            print(
+                                                f"MANUAL_POLL fallback sent for /{cmd_name} status={fb_resp.status_code}",
+                                                flush=True,
+                                            )
                             except Exception as fb_err:
-                                print(f"MANUAL_POLL fallback failed for /{cmd_name}: {fb_err}", flush=True)
+                                print(
+                                    f"MANUAL_POLL fallback failed for /{cmd_name}: {fb_err}",
+                                    flush=True,
+                                )
 
                         # Fallback: if the handler didn't send a reply (PTB
                         # reply_text can silently fail in uvicorn containers),

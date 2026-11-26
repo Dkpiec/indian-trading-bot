@@ -1,4 +1,5 @@
 """Alembic environment configuration for async PostgreSQL migrations."""
+
 from __future__ import annotations
 
 import asyncio

@@ -8,6 +8,7 @@ blocking the event loop.
 Endpoint: wss://api.upstox.com/v3/feed/market-data-feed  (v3, NOT v2)
 Auth: Bearer token via api_client.configuration.auth_settings()['OAUTH2']['value']
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -74,6 +75,7 @@ class UpstoxWSV3:
         # fallback.
         import os as _os
         import sys as _sys
+
         # The adapter is at <app-root>/layers/brokers/upstox_ws_v3.py, so
         # three dirname levels up is the app root (which contains wheelhouse/).
         _app_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
@@ -100,6 +102,7 @@ class UpstoxWSV3:
         # that the SDK's own connect() would attach.
         try:
             from upstox_client.feeder.market_data_feeder_v3 import MarketDataFeederV3
+
             if self._streamer.feeder is None:
                 self._streamer.feeder = MarketDataFeederV3(
                     api_client=api_client,
@@ -111,8 +114,9 @@ class UpstoxWSV3:
                     on_close=self._streamer.handle_close,
                 )
         except Exception as e:  # noqa: BLE001
-            log.warning("Upstox WS feeder pre-init failed (will be created on connect)",
-                        error=str(e))
+            log.warning(
+                "Upstox WS feeder pre-init failed (will be created on connect)", error=str(e)
+            )
         self._feeder = self._streamer.feeder
         self._keys = list(instrument_keys)
         self._mode = mode
@@ -181,8 +185,7 @@ class UpstoxWSV3:
             if not (feeder and feeder.ws and feeder.ws.sock):
                 # Socket not open yet — give the in-flight run_forever thread
                 # time to complete the handshake (redirect + ?r= validation).
-                log.debug("Upstox v3 WS socket not open yet, waiting",
-                          attempt=attempt + 1)
+                log.debug("Upstox v3 WS socket not open yet, waiting", attempt=attempt + 1)
                 await asyncio.sleep(2.0)
                 feeder = self._streamer.feeder
                 continue
@@ -190,17 +193,23 @@ class UpstoxWSV3:
                 if self._keys:
                     feeder.subscribe(list(self._keys), self._mode)
                 self._last_subscribed_ts = time.time()
-                log.info("Upstox v3 WS initial subscribe sent",
-                         count=len(self._keys), attempt=attempt + 1)
+                log.info(
+                    "Upstox v3 WS initial subscribe sent",
+                    count=len(self._keys),
+                    attempt=attempt + 1,
+                )
                 subscribed = True
                 break
             except Exception as e:
-                log.warning("Upstox v3 WS initial subscribe retry",
-                            attempt=attempt + 1, error=str(e))
+                log.warning(
+                    "Upstox v3 WS initial subscribe retry", attempt=attempt + 1, error=str(e)
+                )
                 await asyncio.sleep(1.0)
         if not subscribed:
-            log.error("Upstox v3 WS subscribe could not be confirmed "
-                      "— the socket may flap; liveness check will drive a reconnect")
+            log.error(
+                "Upstox v3 WS subscribe could not be confirmed "
+                "— the socket may flap; liveness check will drive a reconnect"
+            )
         # Verify a live tick actually arrives within ~8s. "Socket open" is
         # not enough: in production the socket flapped and the first
         # subscribe raised "socket is already closed", so no data ever
@@ -213,8 +222,10 @@ class UpstoxWSV3:
                     break
                 await asyncio.sleep(0.5)
             else:
-                log.warning("Upstox v3 WS: no tick within 8s of start "
-                            "— feed may be live but silent, or socket flapping")
+                log.warning(
+                    "Upstox v3 WS: no tick within 8s of start "
+                    "— feed may be live but silent, or socket flapping"
+                )
         # Final health check: if the socket still isn't open after the retry,
         # the WS is down. Log loudly so the Dhan fallback is a conscious
         # degradation, not a silent one.
@@ -300,6 +311,7 @@ class UpstoxWSV3:
         instead of hammering the endpoint and creating a 403 storm.
         """
         import time as _time
+
         last_fail = getattr(self, "_last_ws_fail_ts", 0.0)
         if not last_fail:
             return False
@@ -316,13 +328,16 @@ class UpstoxWSV3:
         fresh socket has time to deliver at least one tick before we re-trigger.
         """
         import time as _time
+
         now = _time.time()
         if now - self._last_reconnect_ts < 30.0:
             return  # grace period after a reconnect
         # Stalled? Check: running but no tick for >120s, OR not started yet.
         if self._running and self._last_tick_ts and (now - self._last_tick_ts) > 120.0:
-            log.warning("Upstox WS auto-reconnect: no tick for %ds — restarting streamer",
-                        int(now - self._last_tick_ts))
+            log.warning(
+                "Upstox WS auto-reconnect: no tick for %ds — restarting streamer",
+                int(now - self._last_tick_ts),
+            )
             self._last_reconnect_ts = now
             # Fire-and-forget: reconnect is async, so schedule it on the loop.
             try:
@@ -338,8 +353,9 @@ class UpstoxWSV3:
             # Don't auto-start here — the engine's start() handles initial connect.
             pass
 
-    async def reconnect(self, instrument_keys: Optional[List[str]] = None,
-                        mode: Optional[str] = None) -> None:
+    async def reconnect(
+        self, instrument_keys: Optional[List[str]] = None, mode: Optional[str] = None
+    ) -> None:
         """Tear down the streamer/feeder socket and start it again.
 
         The SDK's auto_reconnect re-subscribes on close, but in production
@@ -355,8 +371,7 @@ class UpstoxWSV3:
         to clear instead.
         """
         if self.in_cooldown():
-            log.debug("Upstox WS reconnect skipped — in gateway cooldown",
-                      cooldown_s=900)
+            log.debug("Upstox WS reconnect skipped — in gateway cooldown", cooldown_s=900)
             return
         keys = instrument_keys if instrument_keys is not None else self._keys
         m = mode if mode is not None else self._mode
@@ -421,6 +436,7 @@ class UpstoxWSV3:
                 return url
             scheme, host, path = m.group(1), m.group(2), m.group(3)
             import base64, os as _os
+
             sec_key = base64.b64encode(_os.urandom(16)).decode()
             sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
             sock.settimeout(15)
@@ -448,8 +464,7 @@ class UpstoxWSV3:
                 if code in ("301", "302", "307", "308"):
                     loc = re.search(r"(?i)location:\s*(\S+)", resp)
                     if loc:
-                        log.info("Upstox v3 WS following feed redirect",
-                                 target=loc.group(1)[:80])
+                        log.info("Upstox v3 WS following feed redirect", target=loc.group(1)[:80])
                         sock.close()
                         return loc.group(1)
                 # 101 or any non-redirect: close and use the original url.
@@ -457,8 +472,7 @@ class UpstoxWSV3:
                 return url
             except Exception as e:  # noqa: BLE001
                 sock.close()
-                log.warning("Upstox v3 WS redirect resolve failed — using direct URL",
-                            error=str(e))
+                log.warning("Upstox v3 WS redirect resolve failed — using direct URL", error=str(e))
                 return url
 
         def _resolve_via_authorize(auth: str) -> Optional[str]:
@@ -476,6 +490,7 @@ class UpstoxWSV3:
             """
             import urllib.request
             import urllib.error
+
             url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
             req = urllib.request.Request(
                 url,
@@ -483,7 +498,7 @@ class UpstoxWSV3:
                     "Authorization": auth,
                     "Accept": "application/json",
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 },
                 method="GET",
             )
@@ -492,11 +507,11 @@ class UpstoxWSV3:
                     body = json.loads(resp.read())
                     uri = (body.get("data") or {}).get("authorized_redirect_uri")
                     if uri:
-                        log.info("Upstox v3 WS authorize endpoint returned feed URL",
-                                 target=uri[:80])
+                        log.info(
+                            "Upstox v3 WS authorize endpoint returned feed URL", target=uri[:80]
+                        )
                         return uri
-                log.warning("Upstox v3 WS authorize endpoint returned no URI",
-                            body=body)
+                log.warning("Upstox v3 WS authorize endpoint returned no URI", body=body)
             except urllib.error.HTTPError as e:
                 # Log the HTTP status + body so 403/401 entitlement issues
                 # are visible without digging through the raw exception.
@@ -505,17 +520,18 @@ class UpstoxWSV3:
                     err_body = e.read().decode(errors="replace")[:300]
                 except Exception:  # noqa: BLE001
                     pass
-                log.warning("Upstox v3 WS authorize endpoint HTTP error",
-                            status=e.code, body=err_body)
+                log.warning(
+                    "Upstox v3 WS authorize endpoint HTTP error", status=e.code, body=err_body
+                )
             except Exception as e:  # noqa: BLE001
-                log.warning("Upstox v3 WS authorize endpoint failed",
-                            error=str(e))
+                log.warning("Upstox v3 WS authorize endpoint failed", error=str(e))
             return None
 
         def _connect_patched(self):
             feeder = self.feeder
             if feeder is None:
                 from upstox_client.feeder.market_data_feeder_v3 import MarketDataFeederV3
+
                 feeder = MarketDataFeederV3(
                     api_client=self.api_client,
                     instrumentKeys=self.instrumentKeys,
@@ -538,8 +554,10 @@ class UpstoxWSV3:
             now = time.time()
             _last_fail = getattr(self, "_last_ws_fail_ts", 0.0)
             if _last_fail and (now - _last_fail) < 900:
-                log.debug("Upstox v3 WS in cooldown (waiting for gateway slots to clear)",
-                          retry_in_s=int(900 - (now - _last_fail)))
+                log.debug(
+                    "Upstox v3 WS in cooldown (waiting for gateway slots to clear)",
+                    retry_in_s=int(900 - (now - _last_fail)),
+                )
                 return
             auth = self.api_client.configuration.auth_settings().get("OAUTH2", {}).get("value", "")
             if feeder.ws and feeder.ws.sock:
@@ -550,8 +568,11 @@ class UpstoxWSV3:
             # and let websocket-client follow the 302 redirect to wsfeeder-api
             # in-session. Byte-identical to the SDK's own feeder.connect().
             ws_url = "wss://api.upstox.com/v3/feed/market-data-feed"
-            log.info("Upstox v3 WS connecting (SDK-native, cooldown cleared)",
-                     target=ws_url, instruments=len(self.instrumentKeys))
+            log.info(
+                "Upstox v3 WS connecting (SDK-native, cooldown cleared)",
+                target=ws_url,
+                instruments=len(self.instrumentKeys),
+            )
             feeder.ws = _ws.WebSocketApp(
                 ws_url,
                 header=headers,
@@ -567,11 +588,12 @@ class UpstoxWSV3:
 
         # Mark a WS failure so _connect_patched enters cooldown
         _orig_error = streamer.handle_error
+
         def _error_cooled(self, error):
             self._last_ws_fail_ts = time.time()
-            log.warning("Upstox v3 WS error — entering 15-min cooldown",
-                       error=str(error)[:150])
+            log.warning("Upstox v3 WS error — entering 15-min cooldown", error=str(error)[:150])
             _orig_error(error)
+
         streamer.handle_error = _error_cooled.__get__(streamer, type(streamer))
 
         streamer.connect = _connect_patched.__get__(streamer, type(streamer))
@@ -585,9 +607,7 @@ class UpstoxWSV3:
         self._ws_open = True
         log.info("Upstox v3 WS connected")
         if self._loop:
-            self._loop.call_soon_threadsafe(
-                lambda: self._queue.put_nowait({"type": "ws_open"})
-            )
+            self._loop.call_soon_threadsafe(lambda: self._queue.put_nowait({"type": "ws_open"}))
 
     def _on_message(self, message: Any) -> None:
         """Bridge SDK ticks into the async queue.
@@ -642,11 +662,10 @@ class UpstoxWSV3:
                 self._last_tick_ts = time.time()
                 if not self._first_tick_logged:
                     self._first_tick_logged = True
-                    log.info("First Upstox WS tick received",
-                             instrument_key=key, ltp=tick["last_price"])
-                self._loop.call_soon_threadsafe(
-                    lambda t=tick: self._queue.put_nowait(t)
-                )
+                    log.info(
+                        "First Upstox WS tick received", instrument_key=key, ltp=tick["last_price"]
+                    )
+                self._loop.call_soon_threadsafe(lambda t=tick: self._queue.put_nowait(t))
         except asyncio.QueueFull:
             # The consumer (the engine's 1s tick) is behind — the WS stream
             # is faster than the poll loop can drain it. Drop the overflow
@@ -654,8 +673,9 @@ class UpstoxWSV3:
             # stuck (blocking call elsewhere) and LTPs are going stale.
             if time.time() - getattr(self, "_last_queue_full_log", 0.0) > 60.0:
                 self._last_queue_full_log = time.time()
-                log.warning("Upstox WS tick queue full — dropping ticks "
-                            "(consumer blocked or too slow)")
+                log.warning(
+                    "Upstox WS tick queue full — dropping ticks " "(consumer blocked or too slow)"
+                )
         except Exception as e:
             log.error("Upstox WS message bridge error", error=str(e))
 

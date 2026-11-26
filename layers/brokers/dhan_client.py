@@ -4,6 +4,7 @@ API base: https://api.dhan.co/v2
 Auth: access-token header (NOT Bearer).
 NEVER call historical data endpoints — they are chargeable.
 """
+
 from __future__ import annotations
 
 import time
@@ -79,6 +80,7 @@ class DhanClient(BrokerBase):
         """
         import base64
         import json as _json
+
         if not token or "." not in token:
             return 0.0
         try:
@@ -96,6 +98,7 @@ class DhanClient(BrokerBase):
         renew tool writes. Only non-empty tokens are returned.
         """
         import os as _os
+
         out: Dict[str, str] = {}
         env_tok = _os.environ.get("DHAN_ACCESS_TOKEN", "").strip()
         if env_tok:
@@ -146,7 +149,9 @@ class DhanClient(BrokerBase):
         if not cands:
             return
         ranked = sorted(
-            cands.items(), key=lambda kv: self._jwt_exp(kv[1]), reverse=True,
+            cands.items(),
+            key=lambda kv: self._jwt_exp(kv[1]),
+            reverse=True,
         )
         best_src, best_tok = ranked[0]
 
@@ -329,7 +334,8 @@ class DhanClient(BrokerBase):
             url = f"{DHAN_BASE}/marketfeed/ltp"
             payload = {"IDX_I": [sid]}
             resp = await self._http.post(
-                url, json=payload,
+                url,
+                json=payload,
                 headers=self._headers(),
             )
             if resp.status_code == 200:
@@ -341,11 +347,19 @@ class DhanClient(BrokerBase):
                             lp = quote.get("last_price")
                             if lp:
                                 return float(lp)
-                log.debug("Dhan index LTP empty response", symbol=symbol,
-                          status=resp.status_code, body=str(body)[:200])
+                log.debug(
+                    "Dhan index LTP empty response",
+                    symbol=symbol,
+                    status=resp.status_code,
+                    body=str(body)[:200],
+                )
             else:
-                log.debug("Dhan index LTP HTTP error", symbol=symbol,
-                          status=resp.status_code, body=str(resp.text)[:200])
+                log.debug(
+                    "Dhan index LTP HTTP error",
+                    symbol=symbol,
+                    status=resp.status_code,
+                    body=str(resp.text)[:200],
+                )
         except Exception as e:
             log.debug("Dhan index LTP poll failed", symbol=symbol, error=str(e))
         return None
@@ -360,6 +374,7 @@ class DhanClient(BrokerBase):
         """
         import json as _json
         import urllib.request
+
         code = symbol.upper().replace("_", "")
         # Rate-limit check
         cached_entry = self._yahoo_ltp_cache.get(symbol)
@@ -383,7 +398,7 @@ class DhanClient(BrokerBase):
             if not result:
                 return None
             meta = result.get("meta") or {}
-            close = (result.get("indicators", {}).get("quote", [{}])[0].get("close") or [None])
+            close = result.get("indicators", {}).get("quote", [{}])[0].get("close") or [None]
             last = [v for v in close if v is not None]
             if last:
                 val = float(last[-1])
@@ -392,6 +407,7 @@ class DhanClient(BrokerBase):
                 # chart reports a recent lastTradeTime (<= 300s), or when
                 # the market is open and the series has data at all.
                 import datetime as _dt
+
                 last_trade_ts = meta.get("lastTradeTime") or meta.get("regularMarketTime")
                 if last_trade_ts:
                     age = time.time() - int(last_trade_ts)
@@ -399,8 +415,9 @@ class DhanClient(BrokerBase):
                         log.debug("Yahoo index LTP stale", symbol=symbol, age_s=round(age, 1))
                         return None
                 self._yahoo_ltp_cache[symbol] = (time.time(), val)
-                log.debug("Yahoo index LTP resolved", symbol=symbol, ltp=val,
-                          last_trade_ts=last_trade_ts)
+                log.debug(
+                    "Yahoo index LTP resolved", symbol=symbol, ltp=val, last_trade_ts=last_trade_ts
+                )
                 return val
             log.debug("Yahoo index LTP empty", symbol=symbol)
             return None
@@ -408,9 +425,15 @@ class DhanClient(BrokerBase):
             log.warning("Yahoo index LTP poll failed", symbol=symbol, error=str(e))
         return None
 
-    async def get_option_ltp(self, symbol: str, security_id: str = "",
-                             segment: str = "", expiry: str = "",
-                             strike: float = 0.0, option_type: str = "") -> Optional[float]:
+    async def get_option_ltp(
+        self,
+        symbol: str,
+        security_id: str = "",
+        segment: str = "",
+        expiry: str = "",
+        strike: float = 0.0,
+        option_type: str = "",
+    ) -> Optional[float]:
         """Fetch latest LTP for an option contract via Dhan.
 
         Primary: Dhan /market/quote (free, requires security_id).
@@ -443,8 +466,9 @@ class DhanClient(BrokerBase):
             log.debug("Dhan LTP poll failed", symbol=symbol, error=str(e))
         return None
 
-    async def _resolve_option_security_id(self, segment: str, expiry: str,
-                                          strike: float, option_type: str) -> Optional[str]:
+    async def _resolve_option_security_id(
+        self, segment: str, expiry: str, strike: float, option_type: str
+    ) -> Optional[str]:
         """Resolve a Dhan security_id from the free option-chain endpoint.
 
         SENSEX options live on BSE_FNO; NIFTY/BANKNIFTY on NSE_FNO.
@@ -478,18 +502,25 @@ class DhanClient(BrokerBase):
                 ce_pe_key = "CE" if opt_type == "CE" else "PE"
                 if target_expiry:
                     # Exact-expiry match first.
-                    for opt in inner.get(target_expiry, {}).get("data", {}).get(ce_pe_key, []) or []:
+                    for opt in (
+                        inner.get(target_expiry, {}).get("data", {}).get(ce_pe_key, []) or []
+                    ):
                         if abs(float(opt.get("strikePrice", 0)) - strike) < 0.01:
                             sec_id = str(opt.get("securityId", ""))
                             if sec_id:
-                                log.debug("Dhan option chain resolved security_id",
-                                          segment=dhan_seg, strike=strike,
-                                          opt=opt_type, expiry=target_expiry,
-                                          security_id=sec_id)
+                                log.debug(
+                                    "Dhan option chain resolved security_id",
+                                    segment=dhan_seg,
+                                    strike=strike,
+                                    opt=opt_type,
+                                    expiry=target_expiry,
+                                    security_id=sec_id,
+                                )
                                 return sec_id
                     # No exact expiry in the chain — fall back to the nearest
                     # expiry that carries this strike (logged, not silent).
                     import datetime as _dt
+
                     try:
                         target_dt = _dt.date.fromisoformat(target_expiry)
                     except ValueError:
@@ -504,15 +535,23 @@ class DhanClient(BrokerBase):
                                 if not sec_id:
                                     continue
                                 try:
-                                    delta = abs((_dt.date.fromisoformat(expiry_key) - target_dt).days) if target_dt else 0
+                                    delta = (
+                                        abs((_dt.date.fromisoformat(expiry_key) - target_dt).days)
+                                        if target_dt
+                                        else 0
+                                    )
                                 except Exception:
                                     delta = 10_000
                                 if best is None or delta < best[0]:
                                     best = (delta, sec_id, expiry_key)
                     if best:
-                        log.warning("Dhan option chain: requested expiry not found; using nearest",
-                                    segment=dhan_seg, requested=expiry,
-                                    used=best[2], security_id=best[1])
+                        log.warning(
+                            "Dhan option chain: requested expiry not found; using nearest",
+                            segment=dhan_seg,
+                            requested=expiry,
+                            used=best[2],
+                            security_id=best[1],
+                        )
                         return best[1]
                 else:
                     # No expiry requested: keep the old behavior (first match).
@@ -523,9 +562,13 @@ class DhanClient(BrokerBase):
                             if abs(float(opt.get("strikePrice", 0)) - strike) < 0.01:
                                 sec_id = str(opt.get("securityId", ""))
                                 if sec_id:
-                                    log.debug("Dhan option chain resolved security_id",
-                                              segment=dhan_seg, strike=strike,
-                                              opt=opt_type, security_id=sec_id)
+                                    log.debug(
+                                        "Dhan option chain resolved security_id",
+                                        segment=dhan_seg,
+                                        strike=strike,
+                                        opt=opt_type,
+                                        security_id=sec_id,
+                                    )
                                     return sec_id
         except Exception as e:
             log.debug("Dhan option chain resolve failed", error=str(e))

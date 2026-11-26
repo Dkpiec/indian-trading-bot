@@ -1,4 +1,5 @@
 """Admin endpoints: master credential management, user oversight."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status

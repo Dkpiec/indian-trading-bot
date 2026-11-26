@@ -30,6 +30,7 @@ This instance is independent of the ORB legs. It trades a distinct security_id
 strategies on the same underlying+leg from double-entering — the SL-hunt leg
 uses option_type=CE with trigger_type=SLHUNT so it is a distinct leg.
 """
+
 from __future__ import annotations
 
 import json
@@ -42,24 +43,21 @@ from typing import Any, Dict, Optional
 
 # --- Backtest winner config (v4.1b) ---
 DEFAULT_CONFIG = {
-    "om": 0.15,          # open midpoint = (or_high + or_low) / 2
-    "wick": 5.0,        # sweep wick threshold in points
-    "sl": 0.12,         # stop loss 12%
-    "tp1": 0.60,        # first target 60%
-    "tp2": 2.00,        # final target 200%
-    "hold": 54,         # max bars to hold before time stop
-    "or_min": 0.30,     # OR width min (points)
-    "or_max": 1.10,     # OR width max (points)
-    "rej": 0.20,        # rejection wick threshold
-    "lot": 130,         # lot size per entry
-    "dte": "weekly",    # weekly expiry mode
+    "om": 0.15,  # open midpoint = (or_high + or_low) / 2
+    "wick": 5.0,  # sweep wick threshold in points
+    "sl": 0.12,  # stop loss 12%
+    "tp1": 0.60,  # first target 60%
+    "tp2": 2.00,  # final target 200%
+    "hold": 54,  # max bars to hold before time stop
+    "or_min": 0.30,  # OR width min (points)
+    "or_max": 1.10,  # OR width max (points)
+    "rej": 0.20,  # rejection wick threshold
+    "lot": 130,  # lot size per entry
+    "dte": "weekly",  # weekly expiry mode
 }
 
 # Yahoo ^NSEI 5m chart URL (free, no Dhan charge).
-YAHOO_5M_URL = (
-    "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI"
-    "?interval=5m&range=1d"
-)
+YAHOO_5M_URL = "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI" "?interval=5m&range=1d"
 
 # Candles are re-fetched at most once every 55s, in a background thread,
 # so the 1s tick loop never blocks on the Yahoo download and never
@@ -89,6 +87,7 @@ def _fetch_nifty_5m_candles() -> list:
             _candles_refresh_in_flight.set()
 
     if need_refresh:
+
         def _refresh() -> None:
             try:
                 req = urllib.request.Request(YAHOO_5M_URL, headers={"User-Agent": "Mozilla/5.0"})
@@ -100,10 +99,17 @@ def _fetch_nifty_5m_candles() -> list:
                     ts = result.get("timestamp") or []
                     q = (result.get("indicators", {}).get("quote") or [None])[0]
                     if q:
-                        o, h, l, c = q.get("open") or [], q.get("high") or [], q.get("low") or [], q.get("close") or []
+                        o, h, l, c = (
+                            q.get("open") or [],
+                            q.get("high") or [],
+                            q.get("low") or [],
+                            q.get("close") or [],
+                        )
                         for i in range(len(ts)):
                             if all(v is not None for v in (ts[i], o[i], h[i], l[i], c[i])):
-                                candles.append((ts[i], float(o[i]), float(h[i]), float(l[i]), float(c[i])))
+                                candles.append(
+                                    (ts[i], float(o[i]), float(h[i]), float(l[i]), float(c[i]))
+                                )
                 if candles:
                     with _candles_lock:
                         _candles_cache["ts"] = time.time()
@@ -112,6 +118,7 @@ def _fetch_nifty_5m_candles() -> list:
                 pass  # keep the previous cache; the next tick retries
             finally:
                 _candles_refresh_in_flight.clear()
+
         threading.Thread(target=_refresh, daemon=True, name="nifty-slhunt-candles").start()
 
     with _candles_lock:
@@ -137,10 +144,17 @@ class StrategyPlugin:
     def _override_from_params(params: dict) -> dict:
         """Allow operator overrides for the backtest winner config via params."""
         mapping = {
-            "om": "slh_om", "wick": "slh_wick", "sl": "slh_sl",
-            "tp1": "slh_tp1", "tp2": "slh_tp2", "hold": "slh_hold",
-            "or_min": "slh_or_min", "or_max": "slh_or_max",
-            "rej": "slh_rej", "lot": "slh_lot", "dte": "slh_dte",
+            "om": "slh_om",
+            "wick": "slh_wick",
+            "sl": "slh_sl",
+            "tp1": "slh_tp1",
+            "tp2": "slh_tp2",
+            "hold": "slh_hold",
+            "or_min": "slh_or_min",
+            "or_max": "slh_or_max",
+            "rej": "slh_rej",
+            "lot": "slh_lot",
+            "dte": "slh_dte",
         }
         out = {}
         for cfg_key, p_key in mapping.items():
@@ -252,8 +266,9 @@ class StrategyPlugin:
             return None
         return self._sweep_rejection_check(state, p)
 
-    def _exits(self, net_qty: float, entry: float, opt_ltp: float,
-               p: dict, state: dict) -> Optional[dict]:
+    def _exits(
+        self, net_qty: float, entry: float, opt_ltp: float, p: dict, state: dict
+    ) -> Optional[dict]:
         """Staged exit on the held option position.
 
         tp1 (60%): sell 50% + move SL to breakeven.
@@ -304,6 +319,7 @@ class StrategyPlugin:
             }
         # EOD: close before 15:00 IST.
         from zoneinfo import ZoneInfo
+
         now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
         if now_ist.hour * 60 + now_ist.minute >= (15 * 60):
             return {

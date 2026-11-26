@@ -3,6 +3,7 @@
 Provides minimal implementations of the database-dependent operations so the
 bot can continue functioning in degraded mode.
 """
+
 from __future__ import annotations
 
 import asyncio

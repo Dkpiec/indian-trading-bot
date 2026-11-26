@@ -1,4 +1,5 @@
 """SQLAlchemy ORM models for Indian Trading Bot — asyncpg-compatible types."""
+
 from __future__ import annotations
 
 import uuid
@@ -22,6 +23,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     """Shared declarative base for all models."""
+
     pass
 
 
@@ -31,13 +33,13 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(256), unique=True, nullable=False, index=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     telegram_token: Mapped[str | None] = mapped_column(Text, nullable=True)  # Fernet-encrypted
-    telegram_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # SHA-256 for O(1) lookup
+    telegram_token_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )  # SHA-256 for O(1) lookup
     telegram_chat_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     master_override_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -50,10 +52,18 @@ class User(Base):
     )
 
     # relationships
-    credentials = relationship("UserCredential", back_populates="user", cascade="all, delete-orphan")
-    subscriptions = relationship("UserSubscription", back_populates="user", cascade="all, delete-orphan")
-    strategy_instances = relationship("StrategyInstance", back_populates="user", cascade="all, delete-orphan")
-    risk_limits = relationship("RiskLimit", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    credentials = relationship(
+        "UserCredential", back_populates="user", cascade="all, delete-orphan"
+    )
+    subscriptions = relationship(
+        "UserSubscription", back_populates="user", cascade="all, delete-orphan"
+    )
+    strategy_instances = relationship(
+        "StrategyInstance", back_populates="user", cascade="all, delete-orphan"
+    )
+    risk_limits = relationship(
+        "RiskLimit", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
     daily_pnls = relationship("DailyPnl", back_populates="user", cascade="all, delete-orphan")
 
 
@@ -63,9 +73,7 @@ class User(Base):
 class UserCredential(Base):
     __tablename__ = "user_credentials"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -97,13 +105,15 @@ class UserCredential(Base):
 class MasterCredential(Base):
     __tablename__ = "master_credentials"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     broker: Mapped[str] = mapped_column(String(32), nullable=False)
     encrypted_creds: Mapped[str] = mapped_column(Text, nullable=False)
-    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="ALL")  # 'ALL' or 'SELECTED'
-    applies_to: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # NULL when scope='ALL'; JSONB array of UUIDs when 'SELECTED'
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="ALL"
+    )  # 'ALL' or 'SELECTED'
+    applies_to: Mapped[dict | None] = mapped_column(
+        JSONB, nullable=True
+    )  # NULL when scope='ALL'; JSONB array of UUIDs when 'SELECTED'
     priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -135,7 +145,9 @@ class StrategyCatalog(Base):
     plugin_file: Mapped[str] = mapped_column(String(256), nullable=False)
     underlying: Mapped[str] = mapped_column(String(32), nullable=False)  # 'NIFTY', 'SENSEX', 'ANY'
     segment: Mapped[str] = mapped_column(String(16), nullable=False, default="NSE_FNO")
-    strategy_type: Mapped[str] = mapped_column(String(32), nullable=False)  # 'SLHUNT', 'ORB', 'STRADDLE'
+    strategy_type: Mapped[str] = mapped_column(
+        String(32), nullable=False
+    )  # 'SLHUNT', 'ORB', 'STRADDLE'
     default_params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     version: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -155,9 +167,7 @@ class StrategyCatalog(Base):
 class UserSubscription(Base):
     __tablename__ = "user_subscriptions"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
@@ -199,8 +209,12 @@ class StrategyInstance(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     catalog_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="IDLE")  # IDLE, RUNNING, PAUSED, ERROR
-    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="PAPER")  # PAPER, LIVE
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="IDLE"
+    )  # IDLE, RUNNING, PAUSED, ERROR
+    execution_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="PAPER"
+    )  # PAPER, LIVE
     parameters: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     net_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -220,9 +234,7 @@ class StrategyInstance(Base):
 class TradeOrderLedger(Base):
     __tablename__ = "trade_order_ledger"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -234,7 +246,9 @@ class TradeOrderLedger(Base):
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
     price: Mapped[float] = mapped_column(Float, nullable=False)
     order_type: Mapped[str] = mapped_column(String(16), nullable=False)  # MARKET, LIMIT, SL
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")  # PENDING, FILLED, CANCELLED, REJECTED
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="PENDING"
+    )  # PENDING, FILLED, CANCELLED, REJECTED
     filled_quantity: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     average_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -243,9 +257,7 @@ class TradeOrderLedger(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
 
-    __table_args__ = (
-        Index("idx_ledger_user_instance", "user_id", "instance_id"),
-    )
+    __table_args__ = (Index("idx_ledger_user_instance", "user_id", "instance_id"),)
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +266,7 @@ class TradeOrderLedger(Base):
 class DailyPnl(Base):
     __tablename__ = "daily_pnl"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
@@ -287,9 +297,7 @@ class DailyPnl(Base):
 class RiskLimit(Base):
     __tablename__ = "risk_limits"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
     )
@@ -315,6 +323,7 @@ class RiskLimit(Base):
 # ---------------------------------------------------------------------------
 class StrategyRun(Base):
     """Tracks individual strategy execution runs."""
+
     __tablename__ = "strategy_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

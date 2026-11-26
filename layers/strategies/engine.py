@@ -14,6 +14,7 @@ Flow:
     → if EXIT: close position, update P&L, log to TradeOrderLedger
     → update /trades, /profit, /status from live data
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -46,6 +47,7 @@ def _log_throttled(key: str, level: str, msg: str, **kwargs) -> None:
         log.debug(msg, **kwargs)
     else:
         log.info(msg, **kwargs)
+
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -95,13 +97,16 @@ class MarketDataFeed:
         # the cooldown creates a 403 storm and further delays recovery.
         if self._ws_running and not getattr(ws, "_running", False):
             if getattr(ws, "in_cooldown", lambda: False)():
-                log.debug("Upstox WS stopped but in gateway cooldown — waiting",
-                          instruments=len(self._ws_subscribed))
+                log.debug(
+                    "Upstox WS stopped but in gateway cooldown — waiting",
+                    instruments=len(self._ws_subscribed),
+                )
                 self._ws_running = False
                 self._ws_unhealthy_ts = 0.0
                 return
-            log.warning("Upstox WS adapter stopped — restarting feed",
-                        instruments=len(self._ws_subscribed))
+            log.warning(
+                "Upstox WS adapter stopped — restarting feed", instruments=len(self._ws_subscribed)
+            )
             self._ws_running = False
             self._ws_unhealthy_ts = 0.0
             await self.start(list(self._ws_subscribed))
@@ -121,16 +126,20 @@ class MarketDataFeed:
             return
         if now - self._last_ws_reconnect_ts < 60.0:
             return
-        log.warning("Upstox WS stale (no ticks >= 45s) — reconnecting",
-                    last_tick_age=(now - getattr(ws, "_last_tick_ts", 0)) or "never")
+        log.warning(
+            "Upstox WS stale (no ticks >= 45s) — reconnecting",
+            last_tick_age=(now - getattr(ws, "_last_tick_ts", 0)) or "never",
+        )
         self._last_ws_reconnect_ts = now
         try:
             await ws.reconnect(self._ws_subscribed or list(self._ws_subscribed))
             self._ws_unhealthy_ts = 0.0
             _log_throttled(
-                "ws_reconnect", "info",
+                "ws_reconnect",
+                "info",
                 "Upstox WS reconnect issued",
-                instruments=len(self._ws_subscribed))
+                instruments=len(self._ws_subscribed),
+            )
         except Exception as e:
             log.error("Upstox WS reconnect error", error=str(e))
 
@@ -150,16 +159,23 @@ class MarketDataFeed:
         # for BOTH option and index LTPs (the option auto-resolver reads
         # index LTPs from this same feed).
         index_keys = [
-            "NSE_INDEX|NIFTY", "BSE_INDEX|SENSEX", "NSE_INDEX|BANKNIFTY",
+            "NSE_INDEX|NIFTY",
+            "BSE_INDEX|SENSEX",
+            "NSE_INDEX|BANKNIFTY",
         ]
-        new_keys.extend(k for k in index_keys if k not in self._ws_subscribed and k not in instrument_keys)
+        new_keys.extend(
+            k for k in index_keys if k not in self._ws_subscribed and k not in instrument_keys
+        )
         if self._ws_running:
             if new_keys:
                 try:
                     await self._upstox_ws.subscribe(new_keys, mode="ltpc")
                     self._ws_subscribed.update(new_keys)
-                    log.info("Upstox WS: subscribed new instruments",
-                             count=len(new_keys), keys=new_keys[:5])
+                    log.info(
+                        "Upstox WS: subscribed new instruments",
+                        count=len(new_keys),
+                        keys=new_keys[:5],
+                    )
                 except Exception as e:
                     log.warning("Upstox WS subscribe failed", error=str(e))
             return
@@ -173,8 +189,7 @@ class MarketDataFeed:
             self._ws_running = True
             self._ws_subscribed.update(all_keys)
             self._ws_task = asyncio.create_task(self._ws_consume())
-            log.info("Upstox WS started", instruments=len(all_keys),
-                     sample=all_keys[:4])
+            log.info("Upstox WS started", instruments=len(all_keys), sample=all_keys[:4])
         except Exception as e:
             log.warning("Upstox WS failed to start, using Dhan fallback", error=str(e))
             self._ws_running = False
@@ -219,9 +234,12 @@ class MarketDataFeed:
                     # fresh socket + re-subscription — keeping the WS as the
                     # primary LTP source instead of parking on the Dhan poll.
                     _log_throttled(
-                        "ws_closed", "warning",
+                        "ws_closed",
+                        "warning",
                         "Upstox WS closed/error — restart on next tick",
-                        code=tick.get("code"), error=tick.get("error"))
+                        code=tick.get("code"),
+                        error=tick.get("error"),
+                    )
                     self._ws_running = False
                     self._ws_unhealthy_ts = 0.0
                     continue
@@ -245,9 +263,16 @@ class MarketDataFeed:
         except Exception as e:
             log.warning("Upstox WS consume error", error=str(e))
 
-    async def get_ltp(self, instrument_key: str, security_id: str = "", symbol: str = "",
-                      segment: str = "", expiry: str = "", strike: float = 0.0,
-                      option_type: str = "") -> Optional[float]:
+    async def get_ltp(
+        self,
+        instrument_key: str,
+        security_id: str = "",
+        symbol: str = "",
+        segment: str = "",
+        expiry: str = "",
+        strike: float = 0.0,
+        option_type: str = "",
+    ) -> Optional[float]:
         """Get latest LTP for an instrument. Tries WS cache, then Dhan poll.
 
         When the WS is running and the key is subscribed, wait up to ~3s for
@@ -275,8 +300,11 @@ class MarketDataFeed:
             try:
                 if security_id:
                     ltp = await self._dhan.get_option_ltp(
-                        symbol or security_id, security_id=security_id,
-                        segment=segment, expiry=expiry, strike=strike,
+                        symbol or security_id,
+                        security_id=security_id,
+                        segment=segment,
+                        expiry=expiry,
+                        strike=strike,
                         option_type=option_type,
                     )
                     if ltp is not None:
@@ -287,8 +315,11 @@ class MarketDataFeed:
                     # Dhan resolve the security_id from the option chain
                     # (free endpoint) and fetch the LTP.
                     ltp = await self._dhan.get_option_ltp(
-                        symbol or instrument_key, security_id="",
-                        segment=segment, expiry=expiry, strike=strike,
+                        symbol or instrument_key,
+                        security_id="",
+                        segment=segment,
+                        expiry=expiry,
+                        strike=strike,
                         option_type=option_type,
                     )
                     if ltp is not None:
@@ -299,7 +330,11 @@ class MarketDataFeed:
                     # so breakout/breakdown strategies can still evaluate.
                     spot = await self._dhan.get_index_ltp(symbol)
                     if spot is not None:
-                        self._ticks[instrument_key] = {"ltp": spot, "ts": time.time(), "src": "dhan_spot"}
+                        self._ticks[instrument_key] = {
+                            "ltp": spot,
+                            "ts": time.time(),
+                            "src": "dhan_spot",
+                        }
                         # Cache the index LTP so the option auto-resolver can
                         # compute the OTM strike for this underlying.
                         if symbol:
@@ -307,9 +342,12 @@ class MarketDataFeed:
                             _index_ltp_cache[symbol.upper()] = (float(spot), time.time())
                         return spot
                     _log_throttled(
-                        f"no_ltp:{instrument_key}", "debug",
+                        f"no_ltp:{instrument_key}",
+                        "debug",
                         "No LTP available (contract not armed, index poll failed)",
-                        instrument_key=instrument_key, symbol=symbol)
+                        instrument_key=instrument_key,
+                        symbol=symbol,
+                    )
             except Exception as e:
                 log.debug("Dhan LTP poll failed", security_id=security_id, error=str(e))
 
@@ -338,7 +376,9 @@ class MarketDataFeed:
 # /v3/market-quote/quotes endpoint and the WS v3 feed both use this exact
 # format. A formatted string like "NSE_FNO|25000_25DEC26_CE_NIFTY" is NOT a
 # valid Upstox key and the WS server silently drops such subscriptions.
-_UPSTOX_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
+_UPSTOX_INSTRUMENTS_URL = (
+    "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
+)
 _instruments_index: Dict[tuple, str] = {}
 _instruments_loaded_at: float = 0.0
 # Secondary index: (segment, underlying, option_type) -> list of (expiry_iso, strike, instrument_key)
@@ -374,6 +414,7 @@ def _next_weekly_expiry(underlying: str, dte_days: int = 5) -> str:
     cycle.
     """
     from datetime import date, timedelta
+
     today = date.today()
     u = (underlying or "NIFTY").upper()
     target_weekday = 4 if u.startswith("SENSEX") else 3  # BSE=Fri, NSE=Thu
@@ -385,8 +426,11 @@ def _next_weekly_expiry(underlying: str, dte_days: int = 5) -> str:
 
 
 def _find_nearest_option_key(
-    segment: str, underlying: str, option_type: str,
-    target_strike: float, target_expiry: str,
+    segment: str,
+    underlying: str,
+    option_type: str,
+    target_strike: float,
+    target_expiry: str,
 ) -> Optional[str]:
     """Pick the real 'SEG|numeric_id' option contract closest to
     (target_strike, target_expiry) from the instruments JSON.
@@ -410,12 +454,15 @@ def _find_nearest_option_key(
         return None
     # Prefer strikes within 2 days of target_expiry, else all.
     import datetime as _dt
+
     target_date = _dt.date.fromisoformat(target_expiry)
     near = [
-        (exp, st, k) for (exp, st, k) in cands
+        (exp, st, k)
+        for (exp, st, k) in cands
         if abs((_dt.date.fromisoformat(exp) - target_date).days) <= 2
     ]
     pool = near or cands
+
     # Among the pool, pick the strike closest to target_strike; tie-break to
     # the most OTM side (CE -> strike >= spot, PE -> strike <= spot).
     def _score(triple):
@@ -428,6 +475,7 @@ def _find_nearest_option_key(
         # CE: prefer strikes >= target; penalty grows as we go ITM (above).
         diff = st - target_strike
         return (abs(diff), st)
+
     pool.sort(key=lambda t: _score(t))
     return pool[0][2]
 
@@ -450,8 +498,12 @@ def _compute_option_strike(index_ltp: float, underlying: str, option_type: str) 
 
 
 def _resolve_option_key(
-    underlying: str, segment: str, option_type: str,
-    strike: float, expiry: str, index_ltp: Optional[float] = None,
+    underlying: str,
+    segment: str,
+    option_type: str,
+    strike: float,
+    expiry: str,
+    index_ltp: Optional[float] = None,
 ) -> str:
     """Resolve an Upstox option instrument key.
 
@@ -471,9 +523,14 @@ def _resolve_option_key(
     if resolved:
         return resolved
     # 2. No options for this underlying on this segment — readable label.
-    log.warning("No Upstox option found for underlying — key will be dropped by WS",
-                underlying=u, segment=segment, option_type=option_type,
-                strike=strike, expiry=expiry)
+    log.warning(
+        "No Upstox option found for underlying — key will be dropped by WS",
+        underlying=u,
+        segment=segment,
+        option_type=option_type,
+        strike=strike,
+        expiry=expiry,
+    )
     return f"{segment}|{int(strike)}_{u}_{option_type.upper()}"
 
 
@@ -486,11 +543,13 @@ def _load_upstox_instruments(force: bool = False) -> bool:
     """
     global _instruments_index, _instruments_loaded_at, _instruments_by_underlying
     import time as _time
+
     now = _time.time()
     if not force and _instruments_index and (now - _instruments_loaded_at) < 3600:
         return True
     try:
         import urllib.request, gzip
+
         req = urllib.request.Request(
             _UPSTOX_INSTRUMENTS_URL,
             headers={
@@ -505,6 +564,7 @@ def _load_upstox_instruments(force: bool = False) -> bool:
         _instruments_index.clear()
         _instruments_by_underlying.clear()
         from datetime import datetime as _dt, timezone as _tz
+
         for entry in data:
             seg = entry.get("segment", "")
             if seg not in ("NSE_FO", "BSE_FO"):
@@ -554,6 +614,7 @@ def resolve_instrument_key(
         return f"{segment}|{int(strike)}_{underlying}_{option_type.upper()}"  # label fallback
     opt_type = option_type.upper()
     from datetime import datetime as _dt, timezone as _tz
+
     # Normalize expiry to ISO date (params may pass ISO or epoch ms).
     exp_raw = expiry
     if isinstance(exp_raw, (int, float)) and exp_raw > 1e12:
@@ -567,7 +628,10 @@ def resolve_instrument_key(
         return resolved
     log.warning(
         "Upstox instrument not in JSON — WS subscription will be dropped",
-        segment=segment, expiry=expiry_iso, strike=strike, opt_type=opt_type,
+        segment=segment,
+        expiry=expiry_iso,
+        strike=strike,
+        opt_type=opt_type,
     )
     return f"{segment}|{int(strike)}_{underlying}_{opt_type}"
 
@@ -630,9 +694,12 @@ class ExecutionEngine:
         # picked up within one second.
         keys = await self._collect_armed_keys()
         await self._feed.start(keys)
-        log.info("ExecutionEngine started", feed_source=self._feed.source,
-                 ws_instruments=len(keys),
-                 sample_keys=keys[:4])
+        log.info(
+            "ExecutionEngine started",
+            feed_source=self._feed.source,
+            ws_instruments=len(keys),
+            sample_keys=keys[:4],
+        )
 
     async def stop(self) -> None:
         self._running = False
@@ -656,12 +723,15 @@ class ExecutionEngine:
 
         # 1. Find all armed subscriptions
         from sqlalchemy import select
+
         async with self._session_factory() as session:
             result = await session.execute(
-                select(UserSubscription).join(
+                select(UserSubscription)
+                .join(
                     StrategyCatalog,
                     UserSubscription.catalog_id == StrategyCatalog.id,
-                ).where(
+                )
+                .where(
                     UserSubscription.is_armed == True,
                     StrategyCatalog.is_active == True,
                 )
@@ -682,11 +752,13 @@ class ExecutionEngine:
             try:
                 await self._process_subscription(sub)
             except Exception as e:
-                log.error("Strategy execution error",
-                          catalog_id=sub.catalog_id,
-                          error_type=type(e).__name__,
-                          error=str(e),
-                          traceback=__import__('traceback').format_exc())
+                log.error(
+                    "Strategy execution error",
+                    catalog_id=sub.catalog_id,
+                    error_type=type(e).__name__,
+                    error=str(e),
+                    traceback=__import__("traceback").format_exc(),
+                )
 
     # ------------------------------------------------------------------
     # Per-subscription processing
@@ -760,9 +832,7 @@ class ExecutionEngine:
     # State building
     # ------------------------------------------------------------------
 
-    async def _build_state(
-        self, instance_id: str, uid, cat
-    ) -> Dict[str, Any]:
+    async def _build_state(self, instance_id: str, uid, cat) -> Dict[str, Any]:
         """Build the state dict passed to evaluate_tick()."""
         from layers.state.models import StrategyInstance, TradeOrderLedger
         from sqlalchemy import select
@@ -808,9 +878,12 @@ class ExecutionEngine:
             # to UTC — the old code used an IST-aware boundary, so the
             # "one trade per day" guard misfired 00:00-05:30 IST.
             from sqlalchemy import func as _func
-            today_start_utc = datetime.now(IST).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ).astimezone(timezone.utc)
+
+            today_start_utc = (
+                datetime.now(IST)
+                .replace(hour=0, minute=0, second=0, microsecond=0)
+                .astimezone(timezone.utc)
+            )
             result = await session.execute(
                 select(_func.count()).where(
                     TradeOrderLedger.instance_id == instance_id,
@@ -861,12 +934,14 @@ class ExecutionEngine:
         keys: List[str] = []
         async with self._session_factory() as session:
             result = await session.execute(
-                select(UserSubscription).join(
+                select(UserSubscription)
+                .join(
                     StrategyCatalog,
                     UserSubscription.catalog_id == StrategyCatalog.id,
-                ).where(
-                    UserSubscription.is_armed == True,   # noqa: E712
-                    StrategyCatalog.is_active == True,   # noqa: E712
+                )
+                .where(
+                    UserSubscription.is_armed == True,  # noqa: E712
+                    StrategyCatalog.is_active == True,  # noqa: E712
                 )
             )
             subs = result.scalars().all()
@@ -894,16 +969,13 @@ class ExecutionEngine:
 
         try:
             async with self._session_factory() as session:
-                result = await session.execute(
-                    select(distinct(StrategyCatalog.underlying))
-                )
+                result = await session.execute(select(distinct(StrategyCatalog.underlying)))
                 underlyings = [u for (u,) in result.all() if u]
             for u in underlyings:
                 spot = await self._fetch_index_ltp(u.upper())
                 if spot:
                     _index_ltp_cache[u.upper()] = (float(spot), time.time())
-                    log.debug("Index LTP primed for option auto-resolve",
-                              underlying=u, ltp=spot)
+                    log.debug("Index LTP primed for option auto-resolve", underlying=u, ltp=spot)
         except Exception as e:  # noqa: BLE001
             log.debug("Index LTP priming failed", error=str(e))
 
@@ -932,6 +1004,7 @@ class ExecutionEngine:
             return False
         t = now_ist.time()
         from datetime import time as _t
+
         return _t(9, 45, 5) <= t <= _t(13, 15, 0)
 
     # ------------------------------------------------------------------
@@ -1025,8 +1098,12 @@ class ExecutionEngine:
             )
             broker_order_id = order_result.get("broker_order_id", "")
             if order_result.get("status") == "REJECTED":
-                log.error("Entry order rejected", symbol=symbol, segment=segment,
-                          message=order_result.get("message"))
+                log.error(
+                    "Entry order rejected",
+                    symbol=symbol,
+                    segment=segment,
+                    message=order_result.get("message"),
+                )
                 return
             log.info(
                 "Entry order placed",
@@ -1043,9 +1120,7 @@ class ExecutionEngine:
         # Create/update StrategyInstance
         async with self._session_factory() as session:
             result = await session.execute(
-                select(StrategyInstance).where(
-                    StrategyInstance.instance_id == instance_id
-                )
+                select(StrategyInstance).where(StrategyInstance.instance_id == instance_id)
             )
             inst = result.scalar_one_or_none()
             if inst is None:
@@ -1133,8 +1208,9 @@ class ExecutionEngine:
         if not security_id:
             # Cannot close a position without the contract id; the next tick
             # retries once the option-chain resolver has populated it.
-            log.warning("Exit deferred: security_id unresolved",
-                        instance_id=instance_id, catalog_id=cat.id)
+            log.warning(
+                "Exit deferred: security_id unresolved", instance_id=instance_id, catalog_id=cat.id
+            )
             return
 
         if not self._dhan:
@@ -1154,8 +1230,12 @@ class ExecutionEngine:
             )
             broker_order_id = order_result.get("broker_order_id", "")
             if order_result.get("status") == "REJECTED":
-                log.error("Exit order rejected", symbol=symbol, segment=segment,
-                          message=order_result.get("message"))
+                log.error(
+                    "Exit order rejected",
+                    symbol=symbol,
+                    segment=segment,
+                    message=order_result.get("message"),
+                )
                 return
             log.info(
                 "Exit order placed",
@@ -1172,9 +1252,7 @@ class ExecutionEngine:
         # Update instance P&L
         async with self._session_factory() as session:
             result = await session.execute(
-                select(StrategyInstance).where(
-                    StrategyInstance.instance_id == instance_id
-                )
+                select(StrategyInstance).where(StrategyInstance.instance_id == instance_id)
             )
             inst = result.scalar_one_or_none()
             if inst:
@@ -1277,7 +1355,9 @@ class ExecutionEngine:
             log.info("Plugin loaded", instance_id=instance_id, module=module_name)
             return self._plugins[instance_id]
         except Exception as e:
-            log.error("Plugin load failed", instance_id=instance_id, module=module_name, error=str(e))
+            log.error(
+                "Plugin load failed", instance_id=instance_id, module=module_name, error=str(e)
+            )
             return None
 
     # ------------------------------------------------------------------
@@ -1320,9 +1400,12 @@ class ExecutionEngine:
                 option_type = str(first_leg.get("option_type", option_type) or option_type).upper()
         if not strike or not expiry:
             _log_throttled(
-                f"no_sid:{cat.id}", "warning",
+                f"no_sid:{cat.id}",
+                "warning",
                 "security_id unset and no strike/expiry to resolve",
-                catalog_id=cat.id, params_keys=list(params.keys()))
+                catalog_id=cat.id,
+                params_keys=list(params.keys()),
+            )
             return ""
         # Cache resolved ids in a process-local dict (keyed by
         # (segment, expiry, strike, option_type)) — this helper is called
@@ -1341,12 +1424,15 @@ class ExecutionEngine:
         if loop is None:
             # No running loop — safe to block briefly on a fresh one.
             from layers.brokers.dhan_client import DhanClient
+
             async def _resolve_once() -> str:
                 client = DhanClient(client_id="", access_token="")
                 sec_id = await client._resolve_option_security_id(
-                    self._get_segment(cat), str(expiry), float(strike), option_type)
+                    self._get_segment(cat), str(expiry), float(strike), option_type
+                )
                 await client.close()
                 return sec_id or ""
+
             try:
                 sec_id = asyncio.run(_resolve_once())
             except Exception as e:
@@ -1362,22 +1448,27 @@ class ExecutionEngine:
         # callback stores the result in the shared cache.
         try:
             from layers.brokers.dhan_client import DhanClient
+
             client = self._dhan  # authenticated DhanClient from main.py
 
             async def _resolve_async() -> None:
                 if client is None:
                     return
                 sec_id = await client._resolve_option_security_id(
-                    self._get_segment(cat), str(expiry), float(strike), option_type)
+                    self._get_segment(cat), str(expiry), float(strike), option_type
+                )
                 if sec_id and cache_key not in _security_id_cache:
                     _security_id_cache[cache_key] = sec_id
-                    log.info("security_id resolved via option chain",
-                             catalog_id=cat.id, security_id=sec_id)
+                    log.info(
+                        "security_id resolved via option chain",
+                        catalog_id=cat.id,
+                        security_id=sec_id,
+                    )
+
             loop.create_task(_resolve_async())
         except Exception as e:
             log.warning("security_id resolve deferred", catalog_id=cat.id, error=str(e))
         return ""
-
 
     def _get_segment(self, cat) -> str:
         """Return the Dhan exchange_segment for this catalog entry.
@@ -1437,19 +1528,33 @@ class ExecutionEngine:
             index_ltp = _index_ltp_cache.get(underlying.upper(), (0, 0))[0]
             auto_strike = _compute_option_strike(index_ltp, underlying, option_type)
             auto_expiry = _next_weekly_expiry(underlying, 5)
-            auto_key = _resolve_option_key(underlying, segment, option_type, auto_strike, auto_expiry, index_ltp=index_ltp)
+            auto_key = _resolve_option_key(
+                underlying, segment, option_type, auto_strike, auto_expiry, index_ltp=index_ltp
+            )
             _auto_key_cache[(segment, underlying, option_type.upper())] = auto_key
-            log.info("Auto-resolved option key", segment=segment, underlying=underlying,
-                     option_type=option_type, strike=auto_strike, expiry=auto_expiry,
-                     index_ltp=index_ltp, instrument_key=auto_key)
+            log.info(
+                "Auto-resolved option key",
+                segment=segment,
+                underlying=underlying,
+                option_type=option_type,
+                strike=auto_strike,
+                expiry=auto_expiry,
+                index_ltp=index_ltp,
+                instrument_key=auto_key,
+            )
             return auto_key
         # No index LTP available yet — fall back to the readable label (WS
         # will drop it until the index LTP lands and we re-resolve).
         _log_throttled(
-            f"no_key:{underlying}:{option_type}", "warning",
+            f"no_key:{underlying}:{option_type}",
+            "warning",
             "Instrument key unresolved (no strike/expiry in params, no index LTP yet)",
-            underlying=underlying, segment=segment,
-            strike=strike, expiry=expiry, option_type=option_type)
+            underlying=underlying,
+            segment=segment,
+            strike=strike,
+            expiry=expiry,
+            option_type=option_type,
+        )
         return f"{segment}|{strike}_{underlying}_{option_type}"
 
     def _auto_resolve_index_ltp(self, underlying: str) -> bool:

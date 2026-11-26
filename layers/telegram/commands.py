@@ -5,6 +5,7 @@ by the routing wrapper from chat_id → user_id mapping in BotManager.
 Handlers query ONLY that user's data; no cross-user leakage.
 Broker clients and session_factory are accessed via bot_manager.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,8 +16,13 @@ import structlog
 from sqlalchemy import select, func
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes,
-    ConversationHandler, MessageHandler, filters as ptb_filters,
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters as ptb_filters,
 )
 
 from layers.telegram.bot_manager import BotManager
@@ -42,8 +48,16 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
     async def _debug_catch_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id if update.effective_chat else "?"
         text = update.message.text if update.message else "(non-text)"
-        print(f"DEBUG_CATCH_ALL_PRINT: chat_id={chat_id} text={text[:80]} update_id={update.update_id}", flush=True)
-        log.info("DEBUG_CATCH_ALL received update", chat_id=chat_id, text=text[:80], update_id=update.update_id)
+        print(
+            f"DEBUG_CATCH_ALL_PRINT: chat_id={chat_id} text={text[:80]} update_id={update.update_id}",
+            flush=True,
+        )
+        log.info(
+            "DEBUG_CATCH_ALL received update",
+            chat_id=chat_id,
+            text=text[:80],
+            update_id=update.update_id,
+        )
 
     app.add_handler(MessageHandler(filters.ALL, _debug_catch_all), group=-1)
 
@@ -77,7 +91,9 @@ def register_handlers(app: Application, bot_manager: BotManager) -> None:
         entry_points=[CommandHandler("credentials", _wrap(_cred_start, bot_manager))],
         states={
             CRED_SELECT_BROKER: [CallbackQueryHandler(_cred_broker_selected, pattern=r"^cred_")],
-            CRED_ENTER_FIELD: [MessageHandler(ptb_filters.TEXT & ~ptb_filters.COMMAND, _cred_receive_field)],
+            CRED_ENTER_FIELD: [
+                MessageHandler(ptb_filters.TEXT & ~ptb_filters.COMMAND, _cred_receive_field)
+            ],
         },
         fallbacks=[CommandHandler("cancel", _cred_timeout)],
         conversation_timeout=300,
@@ -128,6 +144,7 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
     user_id = await bot_mgr.resolve_user_id(chat_id)
     if not user_id:
         from core.config import settings
+
         # Compare as integers to avoid string formatting mismatches
         try:
             configured_chat = int(str(settings.telegram_chat_id).strip('"').strip("'"))
@@ -145,17 +162,22 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
         # Deterministic UUID for 'system' or any non-UUID user_id
         # Same Telegram chat_id always produces the same UUID
         import uuid as _uuid
+
         uid = _uuid.uuid5(_uuid.NAMESPACE_URL, f"trading-bot:user:{user_id}")
-        log.warning("Callback query user_id not a valid UUID, using deterministic placeholder", chat_id=chat_id, raw_user_id=user_id, uid=str(uid))
+        log.warning(
+            "Callback query user_id not a valid UUID, using deterministic placeholder",
+            chat_id=chat_id,
+            raw_user_id=user_id,
+            uid=str(uid),
+        )
 
         # Auto-register user in users table if not present (satisfies FK constraint)
         from layers.state.models import User
         import hashlib
+
         try:
             async with await _get_session(bot_mgr) as reg_session:
-                existing_user = await reg_session.execute(
-                    select(User).where(User.id == uid)
-                )
+                existing_user = await reg_session.execute(select(User).where(User.id == uid))
                 if not existing_user.scalar_one_or_none():
                     # User model requires email + password_hash (NOT NULL)
                     placeholder_email = f"system-{chat_id}@trading-bot.local"
@@ -204,7 +226,9 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
                 )
             )
             if existing.scalar_one_or_none():
-                await query.edit_message_text(f"ℹ️ Already subscribed to `{strategy_id}`.", parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"ℹ️ Already subscribed to `{strategy_id}`.", parse_mode="Markdown"
+                )
                 return
             sub = UserSubscription(user_id=uid, catalog_id=strategy_id, is_armed=False)
             session.add(sub)
@@ -224,11 +248,15 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
             )
             sub = result.scalar_one_or_none()
             if not sub:
-                await query.edit_message_text(f"❌ Not subscribed to `{strategy_id}`.", parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"❌ Not subscribed to `{strategy_id}`.", parse_mode="Markdown"
+                )
                 return
             await session.delete(sub)
             await session.commit()
-            await query.edit_message_text(f"🔕 Unsubscribed from `{strategy_id}`.", parse_mode="Markdown")
+            await query.edit_message_text(
+                f"🔕 Unsubscribed from `{strategy_id}`.", parse_mode="Markdown"
+            )
             log.info("Strategy unsubscribed via inline", user_id=user_id, strategy=strategy_id)
 
         elif action == "arm":
@@ -240,10 +268,14 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
             )
             sub = result.scalar_one_or_none()
             if not sub:
-                await query.edit_message_text(f"❌ Not subscribed to `{strategy_id}`. Subscribe first.", parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"❌ Not subscribed to `{strategy_id}`. Subscribe first.", parse_mode="Markdown"
+                )
                 return
             if sub.is_armed:
-                await query.edit_message_text(f"ℹ️ `{strategy_id}` is already armed.", parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"ℹ️ `{strategy_id}` is already armed.", parse_mode="Markdown"
+                )
                 return
             sub.is_armed = True
             await session.commit()
@@ -259,10 +291,14 @@ async def _callback_query_handler(update: Update, context: ContextTypes.DEFAULT_
             )
             sub = result.scalar_one_or_none()
             if not sub:
-                await query.edit_message_text(f"❌ Not subscribed to `{strategy_id}`.", parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"❌ Not subscribed to `{strategy_id}`.", parse_mode="Markdown"
+                )
                 return
             if not sub.is_armed:
-                await query.edit_message_text(f"ℹ️ `{strategy_id}` is already disarmed.", parse_mode="Markdown")
+                await query.edit_message_text(
+                    f"ℹ️ `{strategy_id}` is already disarmed.", parse_mode="Markdown"
+                )
                 return
             sub.is_armed = False
             await session.commit()
@@ -277,7 +313,10 @@ def _wrap(handler, bot_manager: BotManager):
     """Wrap a command handler to inject user_id and enforce authorization."""
 
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        print(f"WRAP_CALLED update_type={type(update).__name__} has_chat={update.effective_chat is not None}", flush=True)
+        print(
+            f"WRAP_CALLED update_type={type(update).__name__} has_chat={update.effective_chat is not None}",
+            flush=True,
+        )
         if not update.effective_chat:
             log.debug("Update received with no effective_chat")
             return
@@ -291,11 +330,14 @@ def _wrap(handler, bot_manager: BotManager):
         # Fallback: if chat_id matches the configured system chat, accept as system user
         if not user_id:
             from core.config import settings
+
             try:
                 configured_chat = int(str(settings.telegram_chat_id).strip('"').strip("'"))
                 if int(chat_id) == configured_chat:
                     user_id = "system"
-                    log.info("Chat accepted via configured TELEGRAM_CHAT_ID fallback", chat_id=chat_id)
+                    log.info(
+                        "Chat accepted via configured TELEGRAM_CHAT_ID fallback", chat_id=chat_id
+                    )
             except (ValueError, TypeError):
                 pass
 
@@ -305,9 +347,7 @@ def _wrap(handler, bot_manager: BotManager):
                 chat_id=chat_id,
             )
             if update.message:
-                await update.message.reply_text(
-                    "⚠️ Unauthorized. Chat ID not recognized."
-                )
+                await update.message.reply_text("⚠️ Unauthorized. Chat ID not recognized.")
             return
 
         # Use deterministic UUID matching callback handler's uuid5 logic
@@ -315,15 +355,15 @@ def _wrap(handler, bot_manager: BotManager):
         uid = _parse_user_id(user_id)
         if not uid:
             import uuid as _uuid
+
             uid = _uuid.uuid5(_uuid.NAMESPACE_URL, f"trading-bot:user:{user_id}")
             # Auto-register user in users table if not present (satisfies FK constraint)
             from layers.state.models import User
             import hashlib
+
             try:
                 async with await _get_session(bot_manager) as reg_session:
-                    existing_user = await reg_session.execute(
-                        select(User).where(User.id == uid)
-                    )
+                    existing_user = await reg_session.execute(select(User).where(User.id == uid))
                     if not existing_user.scalar_one_or_none():
                         placeholder_email = f"system-{chat_id}@trading-bot.local"
                         placeholder_hash = hashlib.sha256(f"system:{chat_id}".encode()).hexdigest()
@@ -338,7 +378,9 @@ def _wrap(handler, bot_manager: BotManager):
                         await reg_session.commit()
                         log.info("Auto-registered user via _wrap", uid=str(uid), chat_id=chat_id)
             except Exception as reg_err:
-                log.warning("User auto-registration in _wrap failed (non-fatal)", error=str(reg_err))
+                log.warning(
+                    "User auto-registration in _wrap failed (non-fatal)", error=str(reg_err)
+                )
             # Store the UUID string so handlers can use it consistently
             # This MUST happen even if DB registration failed — ConversationHandler
             # and credential commands don't require a DB row to function.
@@ -351,7 +393,9 @@ def _wrap(handler, bot_manager: BotManager):
             result = await handler(update, context)
             return result  # Pass through return value (required by ConversationHandler)
         except Exception as e:
-            log.error("Command handler error", command=handler.__name__, error=str(e), user_id=user_id)
+            log.error(
+                "Command handler error", command=handler.__name__, error=str(e), user_id=user_id
+            )
             # Safely reply: update.message may be None for callback queries or edge cases
             if update.message:
                 try:
@@ -371,6 +415,7 @@ def _wrap(handler, bot_manager: BotManager):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 async def _get_session(bot_manager: BotManager):
     """Get an async DB session from the bot manager's session factory.
 
@@ -380,9 +425,11 @@ async def _get_session(bot_manager: BotManager):
     if bot_manager._session_factory is None:
         # Return a no-op context manager that yields None
         import contextlib
+
         @contextlib.asynccontextmanager
         async def noop_session():
             yield None
+
         return noop_session()
     return bot_manager._session_factory()
 
@@ -418,6 +465,7 @@ async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if session is None:
         # In-memory fallback
         from layers.state.fallback_db import get_catalog
+
         strategies_data = await get_catalog()
         if not strategies_data:
             await update.message.reply_text("📋 No active strategies in catalog.")
@@ -436,7 +484,9 @@ async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Normal DB path
     async with session as s:
         result = await s.execute(
-            select(StrategyCatalog).where(StrategyCatalog.is_active == True).order_by(StrategyCatalog.id)  # noqa: E712
+            select(StrategyCatalog)
+            .where(StrategyCatalog.is_active == True)
+            .order_by(StrategyCatalog.id)  # noqa: E712
         )
         strategies = result.scalars().all()
 
@@ -458,7 +508,9 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     bot_mgr = context.bot_data["bot_manager"]
     async with await _get_session(bot_mgr) as session:
         result = await session.execute(
-            select(StrategyCatalog).where(StrategyCatalog.is_active == True).order_by(StrategyCatalog.id)  # noqa: E712
+            select(StrategyCatalog)
+            .where(StrategyCatalog.is_active == True)
+            .order_by(StrategyCatalog.id)  # noqa: E712
         )
         strategies = result.scalars().all()
 
@@ -615,7 +667,9 @@ async def _cmd_arm_legacy(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         sub = result.scalar_one_or_none()
         if not sub:
-            await update.message.reply_text(f"❌ Not subscribed to `{strategy_id}`. Use /subscribe first.")
+            await update.message.reply_text(
+                f"❌ Not subscribed to `{strategy_id}`. Use /subscribe first."
+            )
             return
 
         if sub.is_armed:
@@ -664,6 +718,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if session is None:
             # In-memory fallback: show degraded status
             from layers.state.fallback_db import get_catalog
+
             catalog = await get_catalog()
             lines = [
                 "📊 *Status* (degraded — database unavailable)",
@@ -769,9 +824,7 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if session is None:
             floor_pct = 0.20  # Default when DB unavailable
         else:
-            risk_result = await session.execute(
-                select(RiskLimit).where(RiskLimit.user_id == uid)
-            )
+            risk_result = await session.execute(select(RiskLimit).where(RiskLimit.user_id == uid))
             risk = risk_result.scalar_one_or_none()
             floor_pct = risk.balance_floor_pct if risk else 0.20
 
@@ -930,9 +983,13 @@ async def cmd_profit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if dhan_unrealized != 0:
         if total_unrealized != 0 or total_realized != 0:
-            lines.append(f"🏦 *Live Dhan ({len([p for p in dhan_positions if p.get('netQty', 0) != 0])} positions):*")
+            lines.append(
+                f"🏦 *Live Dhan ({len([p for p in dhan_positions if p.get('netQty', 0) != 0])} positions):*"
+            )
         else:
-            lines.append(f"🏦 *Live Dhan ({len([p for p in dhan_positions if p.get('netQty', 0) != 0])} positions):*")
+            lines.append(
+                f"🏦 *Live Dhan ({len([p for p in dhan_positions if p.get('netQty', 0) != 0])} positions):*"
+            )
         lines.append(f"  Unrealized: ₹{dhan_unrealized:,.2f}")
         lines.append("")
 
@@ -984,7 +1041,11 @@ async def cmd_forceexit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 )
                 if order.get("status") == "ACCEPTED":
                     closed += 1
-                    log.info("Force exit order placed", instance=p.instance_id, order=order.get("broker_order_id"))
+                    log.info(
+                        "Force exit order placed",
+                        instance=p.instance_id,
+                        order=order.get("broker_order_id"),
+                    )
                 else:
                     errors.append(f"`{p.instance_id[:12]}…`: {order.get('message', 'rejected')}")
             else:
@@ -1021,7 +1082,9 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     es_h, es_m = map(int, entry_start.split(":"))
     ee_h, ee_m = map(int, entry_end.split(":"))
 
-    market_open = (open_h * 60 + open_m) <= (now_ist.hour * 60 + now_ist.minute) < (close_h * 60 + close_m)
+    market_open = (
+        (open_h * 60 + open_m) <= (now_ist.hour * 60 + now_ist.minute) < (close_h * 60 + close_m)
+    )
     entry_open = (es_h * 60 + es_m) <= (now_ist.hour * 60 + now_ist.minute) < (ee_h * 60 + ee_m)
 
     current_min = now_ist.hour * 60 + now_ist.minute
@@ -1099,9 +1162,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if session is None:
             risk_line = "💳 Floor: 20% (default, DB unavailable)"
         else:
-            risk_result = await session.execute(
-                select(RiskLimit).where(RiskLimit.user_id == uid)
-            )
+            risk_result = await session.execute(select(RiskLimit).where(RiskLimit.user_id == uid))
             risk = risk_result.scalar_one_or_none()
             if risk:
                 floor_pct = risk.balance_floor_pct
@@ -1151,6 +1212,7 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Quick health check: respond with latency."""
     import time
+
     t0 = time.time()
     await update.message.reply_text(f"🏓 Pong! ({(time.time()-t0)*1000:.0f}ms)")
 
@@ -1164,6 +1226,7 @@ async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Read from structured log file if available
     import os
+
     log_file = "/tmp/bot.log"
     if os.path.exists(log_file):
         with open(log_file, "r") as f:
@@ -1298,6 +1361,7 @@ def _decode_jwt_exp(token: str) -> float | None:
 
 # --- Conversation handler steps for /credentials ---
 
+
 async def _cred_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Step 1: Show broker selection for credential entry."""
     if not update.message:
@@ -1307,7 +1371,9 @@ async def _cred_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     for key, info in SUPPORTED_BROKERS.items():
         has_creds = await _load_credentials(key) is not None
         marker = "📝" if has_creds else "➕"
-        buttons.append([InlineKeyboardButton(f"{marker} {info['name']}", callback_data=f"cred_broker:{key}")])
+        buttons.append(
+            [InlineKeyboardButton(f"{marker} {info['name']}", callback_data=f"cred_broker:{key}")]
+        )
     buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cred_cancel")])
 
     await update.message.reply_text(
@@ -1483,6 +1549,7 @@ async def cmd_refresh_token_async(update: Update, context: ContextTypes.DEFAULT_
     dhan_ok = bool(getattr(bot_mgr, "_app_state_dhan_client", None))
 
     from core.config import settings
+
     upstox_ok = bool(getattr(settings, "upstox_access_token", None))
 
     buttons = []
@@ -1546,7 +1613,11 @@ async def _run_refresh_in_background(
 
     script_map = {
         "dhan": ["/opt/data/.venv/bin/python", "/opt/data/scripts/dhan-renew.py", "--force"],
-        "fyers": ["/opt/data/.venv/bin/python", "/opt/data/scripts/fyers_headless_auth.py", "--force"],
+        "fyers": [
+            "/opt/data/.venv/bin/python",
+            "/opt/data/scripts/fyers_headless_auth.py",
+            "--force",
+        ],
         "upstox": None,  # Upstox uses env-var based tokens, no TOTP refresh script
     }
 
@@ -1615,12 +1686,19 @@ async def cmd_broker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     # Check Upstox availability from env
     from core.config import settings
+
     upstox_ok = bool(getattr(settings, "upstox_access_token", None))
 
     buttons = []
     for key, info in SUPPORTED_BROKERS.items():
         has_creds = await _load_credentials(key) is not None
-        active = "✅" if (key == "dhan" and dhan_ok) or (key == "upstox" and upstox_ok) or (key == "fyers" and has_creds) else "❌"
+        active = (
+            "✅"
+            if (key == "dhan" and dhan_ok)
+            or (key == "upstox" and upstox_ok)
+            or (key == "fyers" and has_creds)
+            else "❌"
+        )
         label = f"{active} {info['name']}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"broker:{key}")])
 
@@ -1638,10 +1716,14 @@ async def cmd_refresh_token(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("🔄 Refreshing Dhan access token...")
 
     import subprocess
+
     try:
         result = subprocess.run(
             ["/opt/data/.venv/bin/python", "/opt/data/scripts/dhan-renew.py", "--force"],
-            capture_output=True, text=True, timeout=60, cwd="/opt/data",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd="/opt/data",
         )
         output = result.stdout.strip()
         if result.returncode != 0:
@@ -1660,6 +1742,7 @@ async def cmd_refresh_token(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         hot_swap_ok = False
         try:
             import re as _re
+
             env_path = "/opt/data/secrets/coolify.env"
             with open(env_path) as _fh:
                 _raw = _fh.read()
@@ -1678,6 +1761,7 @@ async def cmd_refresh_token(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             # reload doesn't overwrite with a stale value
                             if hasattr(client, "_token_file_mtime"):
                                 import os as _os
+
                                 try:
                                     client._token_file_mtime = _os.path.getmtime(env_path)
                                 except OSError:
@@ -1693,6 +1777,7 @@ async def cmd_refresh_token(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                             ac._access_token = _new_tok
                             if hasattr(ac, "_token_file_mtime"):
                                 import os as _os
+
                                 try:
                                     ac._token_file_mtime = _os.path.getmtime(env_path)
                                 except OSError:
@@ -1710,10 +1795,10 @@ async def cmd_refresh_token(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             log.warning("In-memory token hot-swap failed", error=str(e))
 
-        status_msg = (
-            f"✅ Dhan token refreshed!\n\n{summary}\n\n"
-            + ("🔄 Token applied live — no restart needed." if hot_swap_ok
-               else "⚠️ Could not hot-swap in memory. Redeploy to apply.")
+        status_msg = f"✅ Dhan token refreshed!\n\n{summary}\n\n" + (
+            "🔄 Token applied live — no restart needed."
+            if hot_swap_ok
+            else "⚠️ Could not hot-swap in memory. Redeploy to apply."
         )
         await update.message.reply_text(status_msg)
         log.info("Dhan token refreshed via /refreshtoken command", hot_swapped=hot_swap_ok)

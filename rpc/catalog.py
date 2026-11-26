@@ -1,4 +1,5 @@
 """Strategy catalog endpoints: list, subscribe, unsubscribe."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,6 +28,7 @@ async def list_catalog(request: Request):
     if not session_factory:
         # Use in-memory fallback catalog
         from layers.state.fallback_db import get_catalog
+
         strategies = await get_catalog()
         return {
             "strategies": strategies,
@@ -37,7 +39,9 @@ async def list_catalog(request: Request):
     try:
         async with session_factory() as session:
             result = await session.execute(
-                select(StrategyCatalog).where(StrategyCatalog.is_active == True).order_by(StrategyCatalog.id)  # noqa: E712
+                select(StrategyCatalog)
+                .where(StrategyCatalog.is_active == True)
+                .order_by(StrategyCatalog.id)  # noqa: E712
             )
             strategies = result.scalars().all()
             return {
@@ -59,6 +63,7 @@ async def list_catalog(request: Request):
     except Exception as e:
         # DB unavailable at runtime — fall back to in-memory catalog
         from layers.state.fallback_db import get_catalog
+
         strategies = await get_catalog()
         return {
             "strategies": strategies,
@@ -78,21 +83,33 @@ async def subscribe(req: SubscribeRequest, request: Request):
     if not session_factory:
         # Use in-memory fallback
         from layers.state.fallback_db import get_catalog_entry, subscribe as fallback_subscribe
+
         entry = await get_catalog_entry(req.catalog_id)
         if not entry:
-            raise HTTPException(status_code=404, detail=f"Strategy {req.catalog_id} not found or inactive")
+            raise HTTPException(
+                status_code=404, detail=f"Strategy {req.catalog_id} not found or inactive"
+            )
         sub_id = await fallback_subscribe(req.catalog_id, "system", req.custom_params)
-        return {"status": "subscribed", "catalog_id": req.catalog_id, "subscription_id": sub_id, "fallback": True}
+        return {
+            "status": "subscribed",
+            "catalog_id": req.catalog_id,
+            "subscription_id": sub_id,
+            "fallback": True,
+        }
 
     # Verify catalog entry exists
     async with session_factory() as session:
         cat_result = await session.execute(
-            select(StrategyCatalog).where(StrategyCatalog.id == req.catalog_id, StrategyCatalog.is_active == True)  # noqa: E712
+            select(StrategyCatalog).where(
+                StrategyCatalog.id == req.catalog_id, StrategyCatalog.is_active == True
+            )  # noqa: E712
         )
         catalog_entry = cat_result.scalar_one_or_none()
 
         if not catalog_entry:
-            raise HTTPException(status_code=404, detail=f"Strategy {req.catalog_id} not found or inactive")
+            raise HTTPException(
+                status_code=404, detail=f"Strategy {req.catalog_id} not found or inactive"
+            )
 
         # Get or create system user
         user_uuid = _uuid.uuid5(_uuid.NAMESPACE_URL, "trading-bot:user:system")
@@ -128,7 +145,11 @@ async def subscribe(req: SubscribeRequest, request: Request):
         session.add(sub)
         await session.commit()
 
-        return {"status": "subscribed", "catalog_id": req.catalog_id, "subscription_id": str(sub.id)}
+        return {
+            "status": "subscribed",
+            "catalog_id": req.catalog_id,
+            "subscription_id": str(sub.id),
+        }
 
 
 @router.delete("/unsubscribe/{catalog_id}")

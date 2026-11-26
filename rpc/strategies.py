@@ -1,9 +1,10 @@
 """Strategy management endpoints: arm, disarm, params, status.
 
 The arm/disarm endpoints persist is_armed on the matching UserSubscription
-row so the execution engine's 1s tick loop (engine.py tick() → 
+row so the execution engine's 1s tick loop (engine.py tick() →
 _load_armed_subs) picks up the strategy within one second.
 """
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request, HTTPException
@@ -39,8 +40,7 @@ async def list_strategies(request: Request):
     try:
         async with session_factory() as session:
             result = await session.execute(
-                select(UserSubscription, StrategyCatalog)
-                .join(
+                select(UserSubscription, StrategyCatalog).join(
                     StrategyCatalog,
                     UserSubscription.catalog_id == StrategyCatalog.id,
                 )
@@ -86,8 +86,11 @@ async def arm_strategy(req: ArmRequest, request: Request):
             rows = result.rowcount
         if rows == 0:
             raise HTTPException(404, f"Subscription {req.subscription_id} not found")
-        return {"status": "armed", "subscription_id": req.subscription_id,
-                "message": "Strategy will go live on the next engine tick (~1s)"}
+        return {
+            "status": "armed",
+            "subscription_id": req.subscription_id,
+            "message": "Strategy will go live on the next engine tick (~1s)",
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -154,8 +157,12 @@ async def update_params(instance_id: str, override: ParamOverride, request: Requ
             params[override.key] = override.value
             sub.custom_params = params
             await session.commit()
-        return {"instance_id": instance_id, "param": override.key,
-                "value": override.value, "status": "updated"}
+        return {
+            "instance_id": instance_id,
+            "param": override.key,
+            "value": override.value,
+            "status": "updated",
+        }
     except HTTPException:
         raise
     except Exception as e:

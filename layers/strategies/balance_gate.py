@@ -9,6 +9,7 @@ Invariants enforced here:
 The floor is computed from total_equity (free + used), NOT free_balance alone,
 to prevent the death spiral described in plan §7.1.
 """
+
 from __future__ import annotations
 
 import time
@@ -48,9 +49,7 @@ class BalanceGate:
         floor = snap.total_equity * FLOOR_PCT
         return max(0.0, snap.free_balance - floor)
 
-    async def check_entry_allowed(
-        self, user_id: str, required_margin: float
-    ) -> bool:
+    async def check_entry_allowed(self, user_id: str, required_margin: float) -> bool:
         """Full pre-entry gate. Returns True only if all checks pass.
 
         Checks in order:

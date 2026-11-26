@@ -6,6 +6,7 @@ dependency-light, pure-logic checks plus AST/source inspection of the
 modules that import third-party packages, so they run in a bare
 interpreter without the full venv.
 """
+
 from __future__ import annotations
 
 import ast
@@ -27,12 +28,17 @@ class TestManualPollConflictYield(unittest.TestCase):
 
     def test_yield_threshold_present_in_source(self):
         s = _src(_BM)
-        self.assertIn("YIELD_AFTER_CONFLICTS = 20", s,
-                      "conflict-yield threshold must be defined in the poll loop")
-        self.assertIn("break", s,
-                      "the poll loop must break (yield) on sustained 409")
-        self.assertIn("consecutive_409 >= YIELD_AFTER_CONFLICTS", s,
-                      "the loop must compare the counter against the threshold")
+        self.assertIn(
+            "YIELD_AFTER_CONFLICTS = 20",
+            s,
+            "conflict-yield threshold must be defined in the poll loop",
+        )
+        self.assertIn("break", s, "the poll loop must break (yield) on sustained 409")
+        self.assertIn(
+            "consecutive_409 >= YIELD_AFTER_CONFLICTS",
+            s,
+            "the loop must compare the counter against the threshold",
+        )
 
     def test_backoff_caps_at_30s(self):
         # The backoff formula: min(n*3, 30) seconds.
@@ -94,7 +100,7 @@ class TestMenuCommandsRegistered(unittest.TestCase):
                 if depth == 0:
                     end = j
                     break
-        block = s[i:end + 1]
+        block = s[i : end + 1]
         tree = ast.parse(block)
         names = []
         for node in ast.walk(tree):
@@ -119,19 +125,17 @@ class TestCommandDispatchWiring(unittest.TestCase):
     def test_start_bot_registers_handlers(self):
         s = _src(_BM)
         # Handlers are registered via register_handlers() + the error handler.
-        self.assertIn("register_handlers", s,
-                      "_build_application must register command handlers")
-        self.assertIn("add_error_handler", s,
-                      "a global error handler must be registered")
+        self.assertIn("register_handlers", s, "_build_application must register command handlers")
+        self.assertIn("add_error_handler", s, "a global error handler must be registered")
         self.assertIn("MENU_COMMANDS", s, "the command menu must be registered")
         self.assertIn("set_my_commands", s)
 
     def test_manual_poll_dispatches_to_process_update(self):
         s = _src(_BM)
-        self.assertIn("process_update", s,
-                      "manual poll must route updates through PTB process_update")
-        self.assertIn("de_json", s,
-                      "manual poll must de_json raw updates into PTB Update objects")
+        self.assertIn(
+            "process_update", s, "manual poll must route updates through PTB process_update"
+        )
+        self.assertIn("de_json", s, "manual poll must de_json raw updates into PTB Update objects")
 
 
 if __name__ == "__main__":

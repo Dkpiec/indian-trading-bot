@@ -7,6 +7,7 @@ so they run in a bare interpreter without the full venv.
 Run: python3 -m pytest tests/test_audit_fixes.py -v
      or: python3 tests/test_audit_fixes.py
 """
+
 from __future__ import annotations
 
 import ast
@@ -33,6 +34,7 @@ def _has_call(name: str, *needles: str) -> bool:
 # 1. Staged-exit sign fix (engine._execute_exit)
 # ---------------------------------------------------------------------------
 
+
 def _staged_net_qty(prev_net_qty: float, qty: int) -> float:
     """Mirror of the engine's staged-exit update."""
     remaining = abs(prev_net_qty) - qty
@@ -57,13 +59,14 @@ class TestStagedExitSign:
     def test_engine_source_no_longer_inverts_sign(self):
         src = _src("layers/strategies/engine.py")
         # The old bug: `-remaining if side == "SELL" else remaining`
-        assert "-remaining if side == \"SELL\"" not in src
+        assert '-remaining if side == "SELL"' not in src
         assert "remaining if (inst.net_qty or 0.0) > 0 else -remaining" in src
 
 
 # ---------------------------------------------------------------------------
 # 2. Balance floor gate (fraction of total_equity, not free_balance)
 # ---------------------------------------------------------------------------
+
 
 class TestBalanceFloor:
     def test_old_formula_never_blocks(self):
@@ -86,11 +89,14 @@ class TestBalanceFloor:
 # 3. trade_taken_today boundary (IST midnight -> UTC)
 # ---------------------------------------------------------------------------
 
+
 class TestTradeTakenTodayBoundary:
     def test_boundary_is_previous_day_1830_utc(self):
         IST = timezone(timedelta(hours=5, minutes=30))
         now_ist = datetime(2026, 11, 23, 4, 0, tzinfo=IST)  # 04:00 IST
-        boundary = now_ist.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        boundary = now_ist.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+            timezone.utc
+        )
         assert boundary == datetime(2026, 11, 22, 18, 30, tzinfo=timezone.utc)
 
     def test_engine_source_converts_to_utc(self):
@@ -102,6 +108,7 @@ class TestTradeTakenTodayBoundary:
 # ---------------------------------------------------------------------------
 # 4. SENSEX EOD exit fires inside the engine tick window
 # ---------------------------------------------------------------------------
+
 
 class TestSensensexEodExit:
     def test_exit_minute_inside_tick_window(self):
@@ -115,6 +122,7 @@ class TestSensensexEodExit:
 # ---------------------------------------------------------------------------
 # 5. SENSEX 5m bar accumulator (real bars, not one synthetic)
 # ---------------------------------------------------------------------------
+
 
 class TestSensexBars:
     def test_source_accumulates_bars(self):
@@ -133,12 +141,16 @@ class TestSensexBars:
 # 6. trade_taken_today read from STATE in ORB plugins
 # ---------------------------------------------------------------------------
 
+
 class TestTradeTakenTodayStateRead:
-    @pytest.mark.parametrize("path", [
-        "catalog/orb_invalidation_strategy_v6e.py",
-        "catalog/orb_invalidation_strategy_v2.py",
-        "catalog/universal_momentum_straddle.py",
-    ])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "catalog/orb_invalidation_strategy_v6e.py",
+            "catalog/orb_invalidation_strategy_v2.py",
+            "catalog/universal_momentum_straddle.py",
+        ],
+    )
     def test_reads_state_first(self, path):
         src = _src(path)
         assert "state.get('trade_taken_today'" in src
@@ -148,11 +160,16 @@ class TestTradeTakenTodayStateRead:
 # 7. Security: master token + require_master + insecure-secret guard
 # ---------------------------------------------------------------------------
 
+
 class TestSecurity:
     def test_issue_master_token_exists_and_sets_claim(self):
         src = _src("core/security.py")
         tree = ast.parse(src)
-        fns = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "issue_master_token"]
+        fns = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "issue_master_token"
+        ]
         assert fns, "issue_master_token not defined"
         assert '"is_master": True' in src or "'is_master': True" in src or "is_master" in src
 
@@ -180,13 +197,19 @@ class TestSecurity:
 # 8. Dhan orderbook v2 paths + security_id resolution
 # ---------------------------------------------------------------------------
 
+
 class TestDhanClient:
     def test_v2_paths_used(self):
         src = _src("layers/brokers/dhan_client.py")
         # No code path may still use the v1 URL (comments may mention it).
         for line in src.splitlines():
             stripped = line.strip()
-            if stripped.startswith("#") or stripped.startswith('"""') or "no longer" in line or "gone" in line:
+            if (
+                stripped.startswith("#")
+                or stripped.startswith('"""')
+                or "no longer" in line
+                or "gone" in line
+            ):
                 continue
             assert "/orderbook/trade/" not in line, f"v1 path still in active code: {line}"
         assert "/orders/history" in src
@@ -194,7 +217,7 @@ class TestDhanClient:
 
     def test_expiry_matched_in_resolver(self):
         src = _src("layers/brokers/dhan_client.py")
-        assert 'inner.get(target_expiry' in src or "target_expiry" in src
+        assert "inner.get(target_expiry" in src or "target_expiry" in src
         assert "requested expiry not found; using nearest" in src
 
     def test_poll_state_is_instance_level(self):
@@ -233,8 +256,8 @@ class TestDhanClient:
             # strip padding so it looks like a compact JWT
             return header.rstrip("=") + "." + payload.rstrip("=") + "." + sig.rstrip("=")
 
-        stale_env = make_jwt(-3600)          # expired 1h ago
-        fresh_disk = make_jwt(24 * 3600)    # valid for 24h
+        stale_env = make_jwt(-3600)  # expired 1h ago
+        fresh_disk = make_jwt(24 * 3600)  # valid for 24h
 
         with tempfile.TemporaryDirectory() as td:
             disk_path = os.path.join(td, "coolify.env")
@@ -245,9 +268,9 @@ class TestDhanClient:
                 with mock.patch.object(DhanClient, "_TOKEN_FILES", (disk_path,)):
                     client = DhanClient(client_id="1234567", access_token=stale_env)
                     # Must have reconciled to the fresher disk token.
-                    assert client._access_token == fresh_disk, (
-                        "stale env token must be superseded by the fresher disk token"
-                    )
+                    assert (
+                        client._access_token == fresh_disk
+                    ), "stale env token must be superseded by the fresher disk token"
 
     def test_jwt_expiry_ranking(self):
         import base64
@@ -257,9 +280,13 @@ class TestDhanClient:
 
         def make_jwt(exp_offset_s: int, marker: str) -> str:
             h = base64.urlsafe_b64encode(json.dumps({"a": 1}).encode()).decode().rstrip("=")
-            p = base64.urlsafe_b64encode(
-                json.dumps({"exp": int(_time.time()) + exp_offset_s, "m": marker}).encode()
-            ).decode().rstrip("=")
+            p = (
+                base64.urlsafe_b64encode(
+                    json.dumps({"exp": int(_time.time()) + exp_offset_s, "m": marker}).encode()
+                )
+                .decode()
+                .rstrip("=")
+            )
             s = base64.urlsafe_b64encode(b"x").decode().rstrip("=")
             return f"{h}.{p}.{s}"
 
@@ -275,10 +302,10 @@ class TestDhanClient:
         assert src.count("self._http.get(url") >= 2, "expect a retry after 401"
 
 
-
 # ---------------------------------------------------------------------------
 # 9. Upstox WS cancellation + queue-full logging
 # ---------------------------------------------------------------------------
+
 
 class TestUpstoxWs:
     def test_ticks_repropagate_cancelled(self):
@@ -289,7 +316,10 @@ class TestUpstoxWs:
             if not (isinstance(cls, ast.ClassDef) and cls.name == "UpstoxWSV3"):
                 continue
             for node in cls.body:
-                if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == "ticks":
+                if (
+                    isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+                    and node.name == "ticks"
+                ):
                     for exc in ast.walk(node):
                         if isinstance(exc, ast.ExceptHandler):
                             exc_name = (
@@ -314,6 +344,7 @@ class TestUpstoxWs:
 # 10. Fallback catalog segments
 # ---------------------------------------------------------------------------
 
+
 class TestFallbackCatalog:
     def test_sensex_segments_are_bse(self):
         src = _src("layers/state/fallback_db.py")
@@ -337,6 +368,7 @@ class TestFallbackCatalog:
 # 11. UpstoxClient product default + funds parsing
 # ---------------------------------------------------------------------------
 
+
 class TestUpstoxClient:
     def test_intraday_default(self):
         src = _src("layers/brokers/upstox_client.py")
@@ -351,6 +383,7 @@ class TestUpstoxClient:
 # 12. NIFTY slhunt: non-blocking candle refresh
 # ---------------------------------------------------------------------------
 
+
 class TestNiftySlhuntFeed:
     def test_refresh_is_background_and_cached(self):
         src = _src("catalog/nifty_slhunt_reversal.py")
@@ -363,6 +396,7 @@ class TestNiftySlhuntFeed:
 # ---------------------------------------------------------------------------
 # 13. Engine: security_id never sent empty; start() unblocks the loop
 # ---------------------------------------------------------------------------
+
 
 class TestEngineSecurityId:
     def test_entry_defers_when_unresolved(self):

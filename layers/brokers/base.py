@@ -5,6 +5,7 @@ the execution router and balance gate can operate on a uniform contract.
 Credentials are always decrypted *before* being passed to the constructor —
 adapters never touch encrypted blobs or the security module directly.
 """
+
 from __future__ import annotations
 
 import time

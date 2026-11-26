@@ -4,6 +4,7 @@ These endpoints back the Telegram bot commands that are forwarded from the
 V0 engine's TG handler. Each queries the DB models or the Dhan client for
 live data.
 """
+
 from __future__ import annotations
 
 import logging
@@ -41,7 +42,9 @@ async def get_positions(request: Request):
         async with session_factory() as session:
             result = await session.execute(
                 select(StrategyInstance, StrategyCatalog)
-                .join(StrategyCatalog, StrategyInstance.catalog_id == StrategyCatalog.id, isouter=True)
+                .join(
+                    StrategyCatalog, StrategyInstance.catalog_id == StrategyCatalog.id, isouter=True
+                )
                 .where(StrategyInstance.net_qty != 0)
                 .order_by(StrategyInstance.updated_at.desc())
             )
@@ -85,7 +88,9 @@ async def get_profit(request: Request):
             # All-time P&L from strategy instances
             r = await session.execute(
                 select(
-                    func.coalesce(func.sum(StrategyInstance.unrealized_pnl), 0.0).label("unrealized"),
+                    func.coalesce(func.sum(StrategyInstance.unrealized_pnl), 0.0).label(
+                        "unrealized"
+                    ),
                     func.coalesce(func.sum(StrategyInstance.realized_pnl), 0.0).label("realized"),
                     func.count(StrategyInstance.instance_id).label("instances"),
                 )
@@ -93,7 +98,9 @@ async def get_profit(request: Request):
             unreal, realized, count = r.one()
 
             # Today's P&L from DailyPnl (most recent row per user, summed)
-            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
             r2 = await session.execute(
                 select(
                     func.coalesce(func.sum(DailyPnl.realized_pnl), 0.0).label("realized"),
@@ -171,9 +178,7 @@ async def get_orders(request: Request, limit: int = Query(10, le=200)):
     try:
         async with session_factory() as session:
             result = await session.execute(
-                select(TradeOrderLedger)
-                .order_by(TradeOrderLedger.created_at.desc())
-                .limit(limit)
+                select(TradeOrderLedger).order_by(TradeOrderLedger.created_at.desc()).limit(limit)
             )
             orders = [
                 {
@@ -220,16 +225,18 @@ async def get_stop_loss(request: Request):
                 params = inst.parameters or {}
                 sl = params.get("stop_loss") or params.get("sl")
                 sl_pct = params.get("stop_loss_pct") or params.get("sl_pct")
-                stops.append({
-                    "instance_id": inst.instance_id,
-                    "catalog_id": inst.catalog_id,
-                    "net_qty": inst.net_qty,
-                    "entry_price": inst.entry_price,
-                    "last_ltp": inst.last_ltp,
-                    "stop_loss": sl,
-                    "stop_loss_pct": sl_pct,
-                    "params_keys": list(params.keys()),
-                })
+                stops.append(
+                    {
+                        "instance_id": inst.instance_id,
+                        "catalog_id": inst.catalog_id,
+                        "net_qty": inst.net_qty,
+                        "entry_price": inst.entry_price,
+                        "last_ltp": inst.last_ltp,
+                        "stop_loss": sl,
+                        "stop_loss_pct": sl_pct,
+                        "params_keys": list(params.keys()),
+                    }
+                )
         return {"stops": stops, "count": len(stops)}
     except Exception as e:
         log.warning("stop-loss query failed: %s", e)

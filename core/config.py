@@ -1,4 +1,5 @@
 """Centralized configuration — all secrets from env, no hardcoded values."""
+
 from __future__ import annotations
 
 import os
@@ -7,7 +8,9 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Database
-    database_url: str = "postgresql+asyncpg://itb_user:itb_pass@localhost:5432/indian_trading_bot_db"
+    database_url: str = (
+        "postgresql+asyncpg://itb_user:itb_pass@localhost:5432/indian_trading_bot_db"
+    )
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

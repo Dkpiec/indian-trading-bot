@@ -1,4 +1,5 @@
 """Fernet encryption for broker credentials + JWT auth + master key middleware."""
+
 from __future__ import annotations
 
 import os
@@ -17,6 +18,7 @@ log = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Fernet Encryption (broker API keys/tokens)
 # ---------------------------------------------------------------------------
+
 
 def _get_fernet() -> Fernet:
     """Get or create Fernet cipher from MASTER_ENCRYPTION_KEY env.
@@ -71,6 +73,7 @@ def verify_encrypted(ciphertext: str) -> bool:
 # JWT Auth (user sessions)
 # ---------------------------------------------------------------------------
 
+
 def create_access_token(user_id: str, broker: str = "dhan", expires_min: int = 1440) -> str:
     """Create a JWT for a user session."""
     now = datetime.now(timezone.utc)
@@ -119,6 +122,7 @@ def decode_token(token: str) -> Optional[dict]:
 # Master Credential Routing
 # ---------------------------------------------------------------------------
 
+
 class MasterCredentialRouter:
     """Routes credential resolution: master override > user credential > 401.
 
@@ -144,13 +148,28 @@ class MasterCredentialRouter:
 
         async with self._session_factory() as session:
             # 1. Check master credentials first (highest priority)
-            master = (await session.execute(
-                select(
-                    type(__import__("layers.state.models", fromlist=["MasterCredential"]).MasterCredential)
-                ).where(
-                    type(__import__("layers.state.models", fromlist=["MasterCredential"]).MasterCredential).broker == broker
+            master = (
+                (
+                    await session.execute(
+                        select(
+                            type(
+                                __import__(
+                                    "layers.state.models", fromlist=["MasterCredential"]
+                                ).MasterCredential
+                            )
+                        ).where(
+                            type(
+                                __import__(
+                                    "layers.state.models", fromlist=["MasterCredential"]
+                                ).MasterCredential
+                            ).broker
+                            == broker
+                        )
+                    )
                 )
-            )).scalars().first()
+                .scalars()
+                .first()
+            )
 
             if master and master.is_active:
                 return {
@@ -161,15 +180,40 @@ class MasterCredentialRouter:
                 }
 
             # 2. Fall back to user's own credential
-            user_cred = (await session.execute(
-                select(
-                    type(__import__("layers.state.models", fromlist=["UserCredential"]).UserCredential)
-                ).where(
-                    type(__import__("layers.state.models", fromlist=["UserCredential"]).UserCredential).user_id == user_id,
-                    type(__import__("layers.state.models", fromlist=["UserCredential"]).UserCredential).broker == broker,
-                    type(__import__("layers.state.models", fromlist=["UserCredential"]).UserCredential).is_active == True,
+            user_cred = (
+                (
+                    await session.execute(
+                        select(
+                            type(
+                                __import__(
+                                    "layers.state.models", fromlist=["UserCredential"]
+                                ).UserCredential
+                            )
+                        ).where(
+                            type(
+                                __import__(
+                                    "layers.state.models", fromlist=["UserCredential"]
+                                ).UserCredential
+                            ).user_id
+                            == user_id,
+                            type(
+                                __import__(
+                                    "layers.state.models", fromlist=["UserCredential"]
+                                ).UserCredential
+                            ).broker
+                            == broker,
+                            type(
+                                __import__(
+                                    "layers.state.models", fromlist=["UserCredential"]
+                                ).UserCredential
+                            ).is_active
+                            == True,
+                        )
+                    )
                 )
-            )).scalars().first()
+                .scalars()
+                .first()
+            )
 
             if user_cred:
                 return {
@@ -182,19 +226,31 @@ class MasterCredentialRouter:
         log.warning("No credential found", user_id=user_id, broker=broker)
         return None
 
-    async def set_master_override(self, broker: str, encrypted_creds: str, scope: str = "ALL", applies_to: Optional[list] = None) -> None:
+    async def set_master_override(
+        self,
+        broker: str,
+        encrypted_creds: str,
+        scope: str = "ALL",
+        applies_to: Optional[list] = None,
+    ) -> None:
         """Set a master credential override for a broker."""
         from sqlalchemy import select
         from layers.state.models import MasterCredential
 
         async with self._session_factory() as session:
             # Deactivate existing master creds for this broker
-            existing = (await session.execute(
-                select(MasterCredential).where(
-                    MasterCredential.broker == broker,
-                    MasterCredential.is_active == True,
+            existing = (
+                (
+                    await session.execute(
+                        select(MasterCredential).where(
+                            MasterCredential.broker == broker,
+                            MasterCredential.is_active == True,
+                        )
+                    )
                 )
-            )).scalars().all()
+                .scalars()
+                .all()
+            )
             for cred in existing:
                 cred.is_active = False
 
@@ -230,7 +286,9 @@ async def get_current_user(
 
     payload = decode_token(credentials.credentials)
     if not payload:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token"
+        )
 
     return {
         "user_id": payload["sub"],
