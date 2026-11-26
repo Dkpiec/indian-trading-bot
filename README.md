@@ -73,3 +73,4 @@ indian-trading-bot/
 
 Private — all rights reserved.# Trigger rebuild Thu Nov 26 06:19:28 UTC 2026
 # Force redeploy Thu Nov 26 06:41:31 UTC 2026
+# Trigger full deploy Thu Nov 26 07:03:02 UTC 2026
