@@ -867,40 +867,76 @@ async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_profit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show unrealized P&L summary from strategy_instances."""
+    """Show P&L summary: strategy-tracked + live broker (Dhan) positions."""
     user_id = context.user_data["user_id"]  # type: ignore[index]
     uid = _parse_user_id(user_id)
     bot_mgr = context.bot_data["bot_manager"]
 
+    # 1) Strategy-tracked P&L from DB
     session_ctx = await _get_session(bot_mgr)
+    total_unrealized = 0.0
+    total_realized = 0.0
+    count = 0
     async with session_ctx as session:
-        if session is None:
-            await update.message.reply_text("💵 No P&L data tracked (database unavailable).")
-            return
+        if session is not None:
+            result = await session.execute(
+                select(
+                    func.sum(StrategyInstance.unrealized_pnl).label("total_unrealized"),
+                    func.sum(StrategyInstance.realized_pnl).label("total_realized"),
+                    func.count(StrategyInstance.instance_id).label("count"),
+                ).where(StrategyInstance.user_id == uid)
+            )
+            row = result.one()
+            total_unrealized = float(row.total_unrealized or 0)
+            total_realized = float(row.total_realized or 0)
+            count = int(row.count or 0)
 
-        result = await session.execute(
-            select(
-                func.sum(StrategyInstance.unrealized_pnl).label("total_unrealized"),
-                func.sum(StrategyInstance.realized_pnl).label("total_realized"),
-                func.count(StrategyInstance.instance_id).label("count"),
-            ).where(StrategyInstance.user_id == uid)
-        )
-        row = result.one()
+    # 2) Live Dhan positions P&L
+    dhan_unrealized = 0.0
+    dhan_positions = []
+    dhan_client = getattr(bot_mgr, "_app_state_dhan_client", None)
+    if dhan_client is not None:
+        try:
+            dhan_positions = await dhan_client.get_positions()
+            for pos in dhan_positions:
+                if pos.get("netQty", 0) != 0:
+                    dhan_unrealized += pos.get("unrealizedProfit", 0)
+        except Exception as e:
+            log.warning("Failed to fetch Dhan positions for P&L", error=str(e))
 
-    total_unrealized = float(row.total_unrealized or 0)
-    total_realized = float(row.total_realized or 0)
-    count = int(row.count or 0)
+    # Combine & display
+    combined_unrealized = total_unrealized + dhan_unrealized
+    combined_realized = total_realized  # Dhan doesn't provide realized via /positions
+    total_count = count + len([p for p in dhan_positions if p.get("netQty", 0) != 0])
 
-    emoji_u = "🟢" if total_unrealized >= 0 else "🔴"
-    emoji_r = "🟢" if total_realized >= 0 else "🔴"
+    emoji_u = "🟢" if combined_unrealized >= 0 else "🔴"
+    emoji_r = "🟢" if combined_realized >= 0 else "🔴"
+    emoji_total = "🟢" if (combined_unrealized + combined_realized) >= 0 else "🔴"
 
-    text = (
-        f"💵 *P&L Summary* ({count} instances)\n\n"
-        f"{emoji_u} Unrealized: ₹{total_unrealized:,.2f}\n"
-        f"{emoji_r} Realized: ₹{total_realized:,.2f}\n"
-        f"{'🟢' if (total_unrealized + total_realized) >= 0 else '🔴'} Total: ₹{total_unrealized + total_realized:,.2f}"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    lines = [
+        f"💵 *P&L Summary* ({total_count} positions)",
+        "",
+        f"{emoji_u} Unrealized: ₹{combined_unrealized:,.2f}",
+        f"{emoji_r} Realized: ₹{combined_realized:,.2f}",
+        f"{emoji_total} Total: ₹{combined_unrealized + combined_realized:,.2f}",
+        "",
+    ]
+
+    if total_unrealized != 0 or total_realized != 0:
+        lines.insert(1, f"🤖 *Strategy-Tracked ({count} instances):*")
+        lines.insert(2, f"  Unrealized: ₹{total_unrealized:,.2f}")
+        lines.insert(3, f"  Realized: ₹{total_realized:,.2f}")
+        lines.insert(4, "")
+
+    if dhan_unrealized != 0:
+        if total_unrealized != 0 or total_realized != 0:
+            lines.append(f"🏦 *Live Dhan ({len([p for p in dhan_positions if p.get('netQty', 0) != 0])} positions):*")
+        else:
+            lines.append(f"🏦 *Live Dhan ({len([p for p in dhan_positions if p.get('netQty', 0) != 0])} positions):*")
+        lines.append(f"  Unrealized: ₹{dhan_unrealized:,.2f}")
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_forceexit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
