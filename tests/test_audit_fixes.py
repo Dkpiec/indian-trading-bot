@@ -153,7 +153,10 @@ class TestTradeTakenTodayStateRead:
     )
     def test_reads_state_first(self, path):
         src = _src(path)
-        assert "state.get('trade_taken_today'" in src
+        # Quote-agnostic check: ruff may format with single or double quotes
+        import re
+
+        assert re.search(r"state\.get\(['\"]trade_taken_today['\"]", src)
 
 
 # ---------------------------------------------------------------------------
