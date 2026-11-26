@@ -373,7 +373,7 @@ def _wrap(handler, bot_manager: BotManager):
 
 async def _get_session(bot_manager: BotManager):
     """Get an async DB session from the bot manager's session factory.
-    
+
     Always returns a session factory context manager.
     If DB is unavailable, returns a no-op context manager.
     """
@@ -414,7 +414,7 @@ async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Browse available strategies from the DB catalog (with in-memory fallback)."""
     bot_mgr = context.bot_data["bot_manager"]
     session = await _get_session(bot_mgr)
-    
+
     if session is None:
         # In-memory fallback
         from layers.state.fallback_db import get_catalog
@@ -422,7 +422,7 @@ async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not strategies_data:
             await update.message.reply_text("📋 No active strategies in catalog.")
             return
-        
+
         lines = ["📋 *Available Strategies:*", ""]
         for i, s in enumerate(strategies_data, 1):
             lines.append(f"{i}. *{s['id']}* — {s['display_name']}")
@@ -432,7 +432,7 @@ async def cmd_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         lines.append("Use /subscribe, /arm, /disarm, /unsubscribe to manage.")
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         return
-    
+
     # Normal DB path
     async with session as s:
         result = await s.execute(
@@ -675,7 +675,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             ]
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
             return
-        
+
         # Get subscriptions with catalog info
         result = await session.execute(
             select(UserSubscription, StrategyCatalog)
@@ -793,38 +793,75 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show open positions for this user from strategy_instances."""
+    """Show open positions: strategy-tracked + live broker (Dhan) positions."""
     user_id = context.user_data["user_id"]  # type: ignore[index]
     uid = _parse_user_id(user_id)
     bot_mgr = context.bot_data["bot_manager"]
 
+    # 1) Strategy-tracked positions from DB
     session_ctx = await _get_session(bot_mgr)
+    strategy_positions = []
     async with session_ctx as session:
-        if session is None:
-            await update.message.reply_text("📈 No open positions tracked (database unavailable).")
-            return
-        
-        result = await session.execute(
-            select(StrategyInstance).where(
-                StrategyInstance.user_id == uid,
-                StrategyInstance.net_qty != 0,
+        if session is not None:
+            result = await session.execute(
+                select(StrategyInstance).where(
+                    StrategyInstance.user_id == uid,
+                    StrategyInstance.net_qty != 0,
+                )
             )
-        )
-        positions = result.scalars().all()
+            strategy_positions = result.scalars().all()
 
-    if not positions:
+    # 2) Live Dhan positions
+    dhan_positions = []
+    dhan_client = getattr(bot_mgr, "_app_state_dhan_client", None)
+    if dhan_client is not None:
+        try:
+            dhan_positions = await dhan_client.get_positions()
+        except Exception as e:
+            log.warning("Failed to fetch Dhan positions", error=str(e))
+
+    # Combine & display
+    lines = ["📈 *Open Positions*", ""]
+    has_any = False
+
+    if strategy_positions:
+        lines.append("🤖 *Strategy-Tracked:*")
+        for p in strategy_positions:
+            direction = "LONG" if p.net_qty > 0 else "SHORT"
+            lines.append(
+                f"• `{p.instance_id[:16]}…` {p.catalog_id}\n"
+                f"  Qty: {abs(p.net_qty):.0f} {direction} | Entry: ₹{p.entry_price or 0:,.2f}\n"
+                f"  LTP: ₹{p.last_ltp or 0:,.2f} | uP&L: ₹{p.unrealized_pnl:,.2f}"
+            )
+            lines.append("")
+        has_any = True
+
+    if dhan_positions:
+        if has_any:
+            lines.append("🏦 *Live Dhan Positions:*")
+        else:
+            lines.append("🏦 *Live Dhan Positions:*")
+        for pos in dhan_positions:
+            if pos.get("netQty", 0) == 0:
+                continue
+            symbol = pos.get("tradingSymbol", "UNKNOWN")
+            net_qty = pos.get("netQty", 0)
+            direction = "LONG" if net_qty > 0 else "SHORT"
+            buy_avg = pos.get("buyAvg", 0)
+            unrealized = pos.get("unrealizedProfit", 0)
+            exchange = pos.get("exchangeSegment", "")
+            product = pos.get("productType", "")
+            lines.append(
+                f"• {symbol} ({exchange}/{product})\n"
+                f"  Qty: {abs(net_qty):.0f} {direction} | Avg: ₹{buy_avg:,.2f}\n"
+                f"  uP&L: ₹{unrealized:,.2f}"
+            )
+            lines.append("")
+        has_any = True
+
+    if not has_any:
         await update.message.reply_text("📈 No open positions.")
         return
-
-    lines = ["📈 *Open Positions:*", ""]
-    for p in positions:
-        direction = "LONG" if p.net_qty > 0 else "SHORT"
-        lines.append(
-            f"• `{p.instance_id[:16]}…` {p.catalog_id}\n"
-            f"  Qty: {abs(p.net_qty):.0f} {direction} | Entry: ₹{p.entry_price or 0:,.2f}\n"
-            f"  LTP: ₹{p.last_ltp or 0:,.2f} | uP&L: ₹{p.unrealized_pnl:,.2f}"
-        )
-        lines.append("")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -840,7 +877,7 @@ async def cmd_profit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if session is None:
             await update.message.reply_text("💵 No P&L data tracked (database unavailable).")
             return
-        
+
         result = await session.execute(
             select(
                 func.sum(StrategyInstance.unrealized_pnl).label("total_unrealized"),
@@ -1428,7 +1465,7 @@ async def cmd_refresh_token_async(update: Update, context: ContextTypes.DEFAULT_
 
 async def _handle_broker_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline keyboard callbacks for refresh triggers only.
-    
+
     NOTE: cred_* callbacks are handled by the /credentials ConversationHandler.
     Do NOT add cred_ matching here or the conversation handler will never see them.
     """

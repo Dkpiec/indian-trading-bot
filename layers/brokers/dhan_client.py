@@ -562,5 +562,18 @@ class DhanClient(BrokerBase):
             return {"status": "CANCELLED", "message": ""}
         return {"status": "ERROR", "message": resp.text}
 
+    async def get_positions(self) -> list[dict]:
+        """Fetch live positions from Dhan v2 /positions endpoint."""
+        self._maybe_reload_token()
+        url = f"{DHAN_BASE}/positions"
+        resp = await self._http.get(url, headers=self._headers())
+        if resp.status_code == 401:
+            self._maybe_reload_token(force=True)
+            resp = await self._http.get(url, headers=self._headers())
+        if resp.status_code != 200:
+            raise RuntimeError(f"Dhan positions failed: {resp.status_code} {resp.text}")
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
     async def close(self) -> None:
         await self._http.aclose()
