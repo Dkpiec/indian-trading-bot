@@ -16,7 +16,7 @@ services:
       - /opt/data/secrets:/opt/data/secrets
       - /opt/data/.venv:/opt/data/.venv:ro
     environment:
-      - DATABASE_URL=postgresql+asyncpg://itb_user:itb_pass@indian-trading-bot-postgres:5432/indian_trading_bot_db
+      - DATABASE_URL=postgresql+asyncpg://itb_user:***@indian-trading-bot-postgres:5432/indian_trading_bot_db
       - REDIS_URL=redis://indian-trading-bot-redis:6379/0
       - MASTER_ENCRYPTION_KEY=${MASTER_ENCRYPTION_KEY}
       - TZ=Asia/Kolkata
@@ -35,6 +35,17 @@ services:
         limits:
           memory: 512M
           cpus: "1.0"
+    labels:
+      - "coolify.managed=true"
+      - "traefik.enable=true"
+      - "traefik.docker.network=coolify"
+      - "traefik.http.routers.itb-http.rule=Host(`itb.161.118.184.188.sslip.io`)"
+      - "traefik.http.routers.itb-http.entrypoints=http"
+      - "traefik.http.routers.itb-https.rule=Host(`itb.161.118.184.188.sslip.io`)"
+      - "traefik.http.routers.itb-https.entrypoints=https"
+      - "traefik.http.routers.itb-https.tls=true"
+      - "traefik.http.routers.itb-https.tls.certresolver=letsencrypt"
+      - "traefik.http.services.itb.loadbalancer.server.port=8000"
 
   indian-trading-bot-postgres:
     image: postgres:16-alpine
