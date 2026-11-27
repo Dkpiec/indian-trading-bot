@@ -20,9 +20,16 @@ install() {
 
 echo "[entrypoint] phase 1: control-plane deps" >&2
 # Minimal deps for core.main to import and uvicorn to start
-# Use set -o pipefail to catch install failures in pipeline
-set -o pipefail
-install fastapi "uvicorn[standard]" pydantic pydantic-settings "sqlalchemy[asyncio]" asyncpg redis structlog cryptography pyjwt httpx python-multipart aiofiles tenacity 2>&1 | tail -2
+# Install critical packages individually with explicit PyPI fallback
+for pkg in fastapi "uvicorn[standard]" pydantic pydantic-settings "sqlalchemy[asyncio]" asyncpg redis structlog cryptography pyjwt httpx python-multipart aiofiles tenacity; do
+    echo "[entrypoint] installing $pkg..." >&2
+    if [ -d "$WHEELHOUSE" ]; then
+        pip install --no-cache-dir --no-index --find-links="$WHEELHOUSE" "$pkg" 2>&1 | tail -1 >&2 || \
+        pip install --no-cache-dir "$pkg" 2>&1 | tail -1 >&2
+    else
+        pip install --no-cache-dir "$pkg" 2>&1 | tail -1 >&2
+    fi
+done
 set +o pipefail
 
 # Healthcheck tools
