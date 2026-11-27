@@ -10,7 +10,9 @@ echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] entrypoint start (pid $$)" >> /app/logs/
 
 install() {
     if [ -d "$WHEELHOUSE" ]; then
-        pip install --no-cache-dir --no-index --find-links="$WHEELHOUSE" "$@"
+        # Try wheelhouse first, fall back to PyPI if package not found
+        pip install --no-cache-dir --no-index --find-links="$WHEELHOUSE" "$@" 2>/dev/null || \
+        pip install --no-cache-dir "$@"
     else
         pip install --no-cache-dir "$@"
     fi
@@ -18,7 +20,7 @@ install() {
 
 echo "[entrypoint] phase 1: control-plane deps" >&2
 # Minimal deps for core.main to import and uvicorn to start
-install fastapi "uvicorn[standard]" pydantic pydantic-settings "sqlalchemy[asyncio]" asyncpg structlog cryptography pyjwt httpx python-multipart aiofiles tenacity 2>&1 | tail -2
+install fastapi "uvicorn[standard]" pydantic pydantic-settings "sqlalchemy[asyncio]" asyncpg redis structlog cryptography pyjwt httpx python-multipart aiofiles tenacity 2>&1 | tail -2
 
 # Healthcheck tools
 if ! command -v curl >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
