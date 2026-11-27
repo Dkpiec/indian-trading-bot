@@ -25,6 +25,10 @@ COPY wheelhouse ./wheelhouse
 COPY requirements.txt .
 RUN pip install --no-cache-dir --find-links ./wheelhouse -r requirements.txt
 
+# Install critical phase-1 packages that wheelhouse lacks (pydantic-settings, redis)
+# So runtime entrypoint phase-1 is instant from cache
+RUN pip install --no-cache-dir pydantic-settings redis
+
 # Copy application code
 COPY . .
 
