@@ -20,7 +20,10 @@ install() {
 
 echo "[entrypoint] phase 1: control-plane deps" >&2
 # Minimal deps for core.main to import and uvicorn to start
+# Use set -o pipefail to catch install failures in pipeline
+set -o pipefail
 install fastapi "uvicorn[standard]" pydantic pydantic-settings "sqlalchemy[asyncio]" asyncpg redis structlog cryptography pyjwt httpx python-multipart aiofiles tenacity 2>&1 | tail -2
+set +o pipefail
 
 # Healthcheck tools
 if ! command -v curl >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
