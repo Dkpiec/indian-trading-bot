@@ -10,9 +10,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install system deps (curl, procps for healthcheck)
+# Install system deps (curl, wget, procps for healthcheck)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    wget \
     procps \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
