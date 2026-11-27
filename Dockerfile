@@ -2,6 +2,8 @@
 # Python 3.12-slim, uses wheelhouse for fast offline installs
 FROM python:3.12-slim
 
+SHELL ["/bin/bash", "-c"]
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
