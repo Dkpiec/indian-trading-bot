@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Indian Trading Bot entrypoint — phased dependency install + supervised uvicorn
 
 set -u
