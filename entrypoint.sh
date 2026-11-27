@@ -21,7 +21,23 @@ install() {
 echo "[entrypoint] phase 1: control-plane deps" >&2
 # Minimal deps for core.main to import and uvicorn to start
 # Install critical packages individually with explicit PyPI fallback
-for pkg in fastapi "uvicorn[standard]" pydantic pydantic-settings "sqlalchemy[asyncio]" asyncpg redis structlog cryptography pyjwt httpx python-multipart aiofiles tenacity; do
+PHASE1_PKGS=(
+    fastapi
+    "uvicorn[standard]"
+    pydantic
+    pydantic-settings
+    "sqlalchemy[asyncio]"
+    asyncpg
+    redis
+    structlog
+    cryptography
+    pyjwt
+    httpx
+    python-multipart
+    aiofiles
+    tenacity
+)
+for pkg in "${PHASE1_PKGS[@]}"; do
     echo "[entrypoint] installing $pkg..." >&2
     if [ -d "$WHEELHOUSE" ]; then
         pip install --no-cache-dir --no-index --find-links="$WHEELHOUSE" "$pkg" 2>&1 | tail -1 >&2 || \
