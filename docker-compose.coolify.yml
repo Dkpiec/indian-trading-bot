@@ -1,0 +1,81 @@
+version: "3.9"
+
+services:
+  indian-trading-bot:
+    image: python:3.12-slim
+    container_name: indian-trading-bot
+    restart: unless-stopped
+    ports:
+      - "8050:8000"
+    env_file:
+      - /opt/data/secrets/coolify.env
+    volumes:
+      - /opt/data/indian-trading-bot:/app
+      - /opt/data/scripts:/opt/data/scripts:ro
+      - /opt/data/secrets:/opt/data/secrets
+      - /opt/data/.venv:/opt/data/.venv:ro
+    working_dir: /app
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://itb_user:***@indian-trading-bot-postgres:5432/indian_trading_bot_db
+      - REDIS_URL=redis://indian-trading-bot-redis:6379/0
+      - MASTER_ENCRYPTION_KEY=${MASTER_ENCRYPTION_KEY}
+      - TZ=Asia/Kolkata
+      - PYTHONPATH=/app
+    depends_on:
+      indian-trading-bot-postgres:
+        condition: service_healthy
+      indian-trading-bot-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    labels:
+      - "coolify.managed=true"
+      - "traefik.enable=true"
+      - "traefik.docker.network=coolify"
+      - "traefik.http.routers.itb-http.rule=Host(`itb.161.118.184.188.sslip.io`)"
+      - "traefik.http.routers.itb-http.entrypoints=http"
+      - "traefik.http.routers.itb-https.rule=Host(`itb.161.118.184.188.sslip.io`)"
+      - "traefik.http.routers.itb-https.entrypoints=https"
+      - "traefik.http.routers.itb-https.tls=true"
+      - "traefik.http.routers.itb-https.tls.certresolver=letsencrypt"
+      - "traefik.http.services.itb.loadbalancer.server.port=8000"
+    command: ["/bin/sh", "/app/entrypoint.sh"]
+
+  indian-trading-bot-postgres:
+    image: postgres:16-alpine
+    container_name: indian-trading-bot-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: indian_trading_bot_db
+      POSTGRES_USER: itb_user
+      POSTGRES_PASSWORD: itb_pass
+    volumes:
+      - itb_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U itb_user -d indian_trading_bot_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  indian-trading-bot-redis:
+    image: redis:7-alpine
+    container_name: indian-trading-bot-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  itb_pgdata:
